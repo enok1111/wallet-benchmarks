@@ -1,0 +1,44 @@
+# Wallet Benchmarks Configuration
+# Copy this file to config.toml and adjust for your environment.
+
+# Esmeralda testnet base node addresses
+base_node_grpc = "http://127.0.0.1:18142"
+base_node_http = "http://127.0.0.1:18142"
+
+# Public Esmeralda testnet peer seeds (optional - wallet will auto-discover)
+peer_seeds = []
+
+# Wallet binary paths
+old_wallet_binary = "minotari_console_wallet"
+new_wallet_binary = "minotari"
+
+# gRPC port base for old wallet instances (each gets a unique port)
+old_wallet_grpc_base_port = 18200
+
+# Scenario parameters (reference defaults from bounty spec)
+a_fund = 10_000_000_000        # Single funding UTXO per mode (~71% of one Esmeralda block reward, in µT)
+c_min = 3                      # Confirmation depth before UTXO is treated as spendable
+volume_target = 512            # Target UTXO count after S1
+doubling_rounds = 6            # Take 1 → 64 UTXOs
+fanout_outputs_per_tx = 8      # Take 64 → 512 UTXOs in one round of 64 txs
+concurrent_batches = [8, 16, 32, 64, 128]  # Ramp for S4
+s4_t_budget = 900              # Stop condition per batch in S4 (seconds, 15 min)
+s5_m = 100                     # Total recipients paid in S5
+s5_k = 10                      # Outputs per batch tx in S5 (→ 10 batch txs vs. 100 individual txs)
+fee_rate = 5                   # Explicit fee rate passed to all modes (µT per gram)
+
+# Wallet binary versions (pinned for reproducibility)
+[wallet_versions]
+old_wallet = "v5.3.0-pre.1"
+new_wallet = "main"
+base_node = "v5.3.0-pre.1"
+
+# Execution control
+scenarios = ["B0", "S0", "S1", "S2", "S3", "S4", "S5", "S6", "S7"]
+modes = ["old", "new", "payment_processor"]
+
+# Seed words for each wallet mode (12-word BIP39 mnemonic)
+# If not provided, random seeds will be generated for each run.
+# seed_words_old = ["word1", "word2", ...]
+# seed_words_new = ["word1", "word2", ...]
+# seed_words_payment = ["word1", "word2", ...]

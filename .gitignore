@@ -1,0 +1,24 @@
+# Build artifacts
+/target
+/Cargo.lock
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Config (secrets)
+config.toml
+
+# Results (generated)
+results/*.json
+!results/.gitkeep
+
+# Logs
+*.log
+logs/
