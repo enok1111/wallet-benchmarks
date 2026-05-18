@@ -243,7 +243,10 @@ fn default_base_node_version() -> String {
 }
 
 impl HarnessConfig {
-    /// Load configuration from a TOML file, merging with defaults
+    /// Load configuration from a TOML file.
+    ///
+    /// Fields with `#[serde(default)]` are automatically populated with defaults
+    /// when missing from the config file, so no manual merging is needed.
     pub fn load(path: &str) -> Result<Self> {
         let path = Path::new(path);
 
@@ -255,83 +258,11 @@ impl HarnessConfig {
         let content = std::fs::read_to_string(path)
             .with_context(|| format!("Failed to read config file: {}", path.display()))?;
 
-        // Parse TOML and merge with defaults using serde
+        // serde(default) handles missing fields automatically
         let parsed: HarnessConfig =
             toml::from_str(&content).with_context(|| "Failed to parse config file")?;
 
-        // Merge parsed values with defaults (parsed overrides defaults for missing fields)
-        let mut default_cfg = Self::default();
-
-        // Override fields that were present in the parsed config
-        // This is a simple field-by-field merge since TOML parsing gives us partial structs
-        if !parsed.base_node_grpc.is_empty() {
-            default_cfg.base_node_grpc = parsed.base_node_grpc;
-        }
-        if !parsed.base_node_http.is_empty() {
-            default_cfg.base_node_http = parsed.base_node_http;
-        }
-        if !parsed.peer_seeds.is_empty() {
-            default_cfg.peer_seeds = parsed.peer_seeds;
-        }
-        if !parsed.old_wallet_binary.is_empty() {
-            default_cfg.old_wallet_binary = parsed.old_wallet_binary;
-        }
-        if !parsed.new_wallet_binary.is_empty() {
-            default_cfg.new_wallet_binary = parsed.new_wallet_binary;
-        }
-        if parsed.old_wallet_grpc_base_port != 0 {
-            default_cfg.old_wallet_grpc_base_port = parsed.old_wallet_grpc_base_port;
-        }
-        if parsed.a_fund != 0 {
-            default_cfg.a_fund = parsed.a_fund;
-        }
-        if parsed.c_min != 0 {
-            default_cfg.c_min = parsed.c_min;
-        }
-        if parsed.volume_target != 0 {
-            default_cfg.volume_target = parsed.volume_target;
-        }
-        if parsed.doubling_rounds != 0 {
-            default_cfg.doubling_rounds = parsed.doubling_rounds;
-        }
-        if parsed.fanout_outputs_per_tx != 0 {
-            default_cfg.fanout_outputs_per_tx = parsed.fanout_outputs_per_tx;
-        }
-        if !parsed.concurrent_batches.is_empty() {
-            default_cfg.concurrent_batches = parsed.concurrent_batches;
-        }
-        if parsed.s4_t_budget != 0 {
-            default_cfg.s4_t_budget = parsed.s4_t_budget;
-        }
-        if parsed.s5_m != 0 {
-            default_cfg.s5_m = parsed.s5_m;
-        }
-        if parsed.s5_k != 0 {
-            default_cfg.s5_k = parsed.s5_k;
-        }
-        if parsed.fee_rate != 0 {
-            default_cfg.fee_rate = parsed.fee_rate;
-        }
-        if !parsed.scenarios.is_empty() {
-            default_cfg.scenarios = parsed.scenarios;
-        }
-        if !parsed.modes.is_empty() {
-            default_cfg.modes = parsed.modes;
-        }
-        if parsed.wallet_password.is_some() {
-            default_cfg.wallet_password = parsed.wallet_password;
-        }
-        if parsed.seed_words_old.is_some() {
-            default_cfg.seed_words_old = parsed.seed_words_old;
-        }
-        if parsed.seed_words_new.is_some() {
-            default_cfg.seed_words_new = parsed.seed_words_new;
-        }
-        if parsed.seed_words_payment.is_some() {
-            default_cfg.seed_words_payment = parsed.seed_words_payment;
-        }
-
-        Ok(default_cfg)
+        Ok(parsed)
     }
 
     /// Validate configuration parameters

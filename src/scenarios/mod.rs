@@ -17,8 +17,9 @@ pub async fn run_old_wallet_mode(config: &HarnessConfig) -> Result<ModeResult> {
     use crate::modes::old_wallet::OldWalletMode;
     use crate::modes::WalletMode;
 
-    let data_dir = tempfile::TempDir::new()?.into_path();
-    let mut mode = OldWalletMode::new(data_dir, config.old_wallet_grpc_base_port);
+    // Keep TempDir alive to prevent directory leaks
+    let temp_dir = tempfile::TempDir::new()?;
+    let mut mode = OldWalletMode::new(temp_dir.path().to_path_buf(), config.old_wallet_grpc_base_port);
 
     // Initialize wallet
     mode.initialize(config).await?;
@@ -32,9 +33,10 @@ pub async fn run_old_wallet_mode(config: &HarnessConfig) -> Result<ModeResult> {
         scenarios.insert(scenario_id.clone(), result);
     }
 
-    // Teardown
+    // Teardown (process killed before temp_dir dropped)
     mode.teardown().await?;
 
+    // temp_dir automatically cleaned up when dropped
     Ok(ModeResult {
         mode: "old".to_string(),
         scenarios,
@@ -46,8 +48,9 @@ pub async fn run_new_wallet_mode(config: &HarnessConfig) -> Result<ModeResult> {
     use crate::modes::new_wallet::NewWalletMode;
     use crate::modes::WalletMode;
 
-    let data_dir = tempfile::TempDir::new()?.into_path();
-    let mut mode = NewWalletMode::new(data_dir);
+    // Keep TempDir alive to prevent directory leaks
+    let temp_dir = tempfile::TempDir::new()?;
+    let mut mode = NewWalletMode::new(temp_dir.path().to_path_buf());
 
     // Initialize wallet
     mode.initialize(config).await?;
@@ -64,6 +67,7 @@ pub async fn run_new_wallet_mode(config: &HarnessConfig) -> Result<ModeResult> {
     // Teardown
     mode.teardown().await?;
 
+    // temp_dir automatically cleaned up when dropped
     Ok(ModeResult {
         mode: "new".to_string(),
         scenarios,
@@ -75,8 +79,9 @@ pub async fn run_payment_processor_mode(config: &HarnessConfig) -> Result<ModeRe
     use crate::modes::payment_processor::PaymentProcessorMode;
     use crate::modes::WalletMode;
 
-    let data_dir = tempfile::TempDir::new()?.into_path();
-    let mut mode = PaymentProcessorMode::new(data_dir);
+    // Keep TempDir alive to prevent directory leaks
+    let temp_dir = tempfile::TempDir::new()?;
+    let mut mode = PaymentProcessorMode::new(temp_dir.path().to_path_buf());
 
     // Initialize wallet
     mode.initialize(config).await?;
@@ -96,6 +101,7 @@ pub async fn run_payment_processor_mode(config: &HarnessConfig) -> Result<ModeRe
     // Teardown
     mode.teardown().await?;
 
+    // temp_dir automatically cleaned up when dropped
     Ok(ModeResult {
         mode: "payment_processor".to_string(),
         scenarios,

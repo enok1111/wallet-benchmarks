@@ -45,12 +45,19 @@ impl NewWalletMode {
         }
     }
 
-    /// Generate a random 12-word seed phrase for testing
-    fn generate_seed_words() -> Vec<String> {
-        vec![
-            "abandon".to_string(), "ability".to_string(), "able".to_string(), "about".to_string(), "above".to_string(), "absent".to_string(),
-            "absorb".to_string(), "abstract".to_string(), "absurd".to_string(), "abuse".to_string(), "access".to_string(), "accident".to_string(),
-        ]
+    /// Generate a unique 12-word seed phrase for this mode.
+    /// Each mode gets a different seed to avoid cryptographic collisions
+    /// when running sequentially or concurrently on the same network.
+    fn generate_seed_words(mode_suffix: &str) -> Vec<String> {
+        // Base BIP39 words - each mode appends a unique suffix word
+        let mut words = vec![
+            "abandon".to_string(), "ability".to_string(), "able".to_string(), "about".to_string(),
+            "above".to_string(), "absent".to_string(), "absorb".to_string(), "abstract".to_string(),
+            "absurd".to_string(), "abuse".to_string(), "access".to_string(),
+        ];
+        // Unique suffix word per mode to ensure different keys
+        words.push(format!("{}{}", "accident", mode_suffix));
+        words
     }
 
     /// Initialize the wallet database with view key and spend public key
@@ -103,12 +110,12 @@ impl WalletMode for NewWalletMode {
         // Create data directory
         std::fs::create_dir_all(&self.data_dir)?;
 
-        // Generate or use provided seed words
+        // Generate or use provided seed words (unique per mode)
         if self.seed_words.is_empty() {
             self.seed_words = config
                 .seed_words_new
                 .clone()
-                .unwrap_or_else(Self::generate_seed_words);
+                .unwrap_or_else(|| Self::generate_seed_words("new"));
         }
 
         // Initialize wallet database with birthday height 0 (genesis)
