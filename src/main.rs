@@ -8,6 +8,7 @@
 //! All nine scenarios (B0, S0-S7) run per wallet mode on Esmeralda testnet.
 
 mod config;
+mod http_rpc;
 mod metrics;
 mod modes;
 mod scenarios;

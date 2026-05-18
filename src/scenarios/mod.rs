@@ -3,6 +3,8 @@
 //! Runs all nine scenarios (B0, S0-S7) for each wallet mode.
 //! Each scenario is implemented per-mode to capture mode-specific behavior.
 
+pub mod b0_baseline;
+
 use anyhow::Result;
 use log::info;
 use std::collections::HashMap;
