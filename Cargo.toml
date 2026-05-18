@@ -24,7 +24,7 @@ sysinfo = "0.35"
 tempfile = "3.14"
 thiserror = "2.0"
 tokio = { version = "1.47", features = ["full"] }
-tonic = "0.12"
+tonic = "0.13"
 prost = "0.13"
 reqwest = { version = "0.12", features = ["json", "stream"] }
 uuid = { version = "1", features = ["v4"] }

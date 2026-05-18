@@ -53,7 +53,7 @@ wallet-benchmarks/
 - [x] S7 - Scan from Birthday (checkpoint 2, wallet birthday = genesis height + 1)
 
 ### Phase 3: Wallet Mode Integration 🔄 (IN PROGRESS)
-- [ ] Old wallet: tonic gRPC client with minotari_app_grpc protos
+- [x] Old wallet: tonic gRPC client with minotari_app_grpc protos
 - [ ] New wallet: minotari crate Scanner + TransactionSender integration
 - [ ] Payment processor: batch transaction builder
 

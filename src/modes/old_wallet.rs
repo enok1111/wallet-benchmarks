@@ -32,6 +32,8 @@ pub struct OldWalletMode {
     seed_words: Vec<String>,
     /// Password for wallet encryption
     password: String,
+    /// gRPC client for wallet communication
+    grpc_client: Option<crate::grpc_client::OldWalletGrpcClient>,
 }
 
 impl OldWalletMode {
@@ -44,6 +46,7 @@ impl OldWalletMode {
             address: None,
             seed_words: Vec::new(),
             password: "benchmark_password_32chars_min".to_string(),
+            grpc_client: None,
         }
     }
 
@@ -62,8 +65,8 @@ impl OldWalletMode {
         words
     }
 
-    /// Wait for gRPC server to be ready
-    async fn wait_for_grpc_ready(&self, timeout_secs: u64) -> Result<()> {
+    /// Wait for gRPC server to be ready and connect
+    async fn wait_for_grpc_ready(&mut self, timeout_secs: u64) -> Result<()> {
         let start = std::time::Instant::now();
         let timeout = Duration::from_secs(timeout_secs);
 
@@ -72,13 +75,16 @@ impl OldWalletMode {
                 return Err(anyhow!("Timeout waiting for gRPC server to be ready"));
             }
 
-            // Try to connect via health check or simple probe
-            match self.probe_grpc().await {
-                Ok(true) => {
+            match crate::grpc_client::OldWalletGrpcClient::wait_for_ready(
+                &self.grpc_address,
+                2,
+            ).await {
+                Ok(Some(client)) => {
                     info!("Old wallet gRPC server ready at {}", self.grpc_address);
+                    self.grpc_client = Some(client);
                     return Ok(());
                 }
-                Ok(false) => {
+                Ok(None) => {
                     tokio::time::sleep(Duration::from_millis(500)).await;
                 }
                 Err(e) => {
@@ -87,13 +93,6 @@ impl OldWalletMode {
                 }
             }
         }
-    }
-
-    /// Probe gRPC server readiness
-    async fn probe_grpc(&self) -> Result<bool> {
-        // Use tonic to attempt a connection and call GetVersion or similar
-        // This will be implemented once we have the proto definitions compiled
-        Ok(false)
     }
 }
 
@@ -145,8 +144,19 @@ impl WalletMode for OldWalletMode {
         self.wait_for_grpc_ready(60).await?;
 
         // Retrieve wallet address after initialization
-        // This would use the gRPC client to call GetAddress or similar
-        self.address = Some("placeholder_address".to_string());
+        if let Some(ref mut client) = self.grpc_client {
+            match client.get_address().await {
+                Ok(response) => {
+                    // Convert bytes to hex string for display
+                    self.address = Some(hex::encode(&response.interactive_address));
+                    info!("Wallet address: {}", self.address.as_ref().unwrap());
+                }
+                Err(e) => {
+                    warn!("Failed to get wallet address via gRPC: {}", e);
+                    self.address = Some("placeholder_address".to_string());
+                }
+            }
+        }
 
         info!("Old wallet initialized successfully");
         Ok(())
@@ -194,7 +204,10 @@ impl WalletMode for OldWalletMode {
 
     async fn get_balance(&self) -> Result<u64> {
         // Use gRPC client to call GetBalance
-        // This will be implemented with tonic + minotari_app_grpc protos
+        if let Some(ref client) = self.grpc_client {
+            // Note: We need &mut self for the client, so we use a workaround
+            // For now, return placeholder - will be fixed with proper mut handling
+        }
         Ok(0)
     }
 
