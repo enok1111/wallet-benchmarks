@@ -3,111 +3,110 @@
 //! These tests verify the core functionality of the benchmark harness:
 //! - Config parsing and validation
 //! - Metrics collection and result profile generation
-//! - HTTP RPC client functionality (with mock responses)
 //! - Scenario execution flow
 
 use std::collections::HashMap;
-use std::path::PathBuf;
-use std::time::Duration;
 
 use wallet_benchmarks::config::HarnessConfig;
-use wallet_benchmarks::metrics::{BenchmarkResult, ResultProfile, ScenarioResult};
+use wallet_benchmarks::metrics::{EnvironmentInfo, ModeResult, ResultProfile, ScenarioResult};
 
-/// Test that default configuration values are reasonable
+// ============================================================================
+// Config tests
+// ============================================================================
+
 #[test]
 fn test_default_config_values() {
     let config = HarnessConfig::default();
 
-    // Verify sensible defaults
-    assert_eq!(config.network, "esmeralda");
     assert_eq!(config.base_node_http, "http://127.0.0.1:18142");
-    assert_eq!(config.a_fund, 1_000_000_000); // 1 T funding amount
+    assert_eq!(config.a_fund, 10_000_000_000); // 10,000 tXTM in µT
     assert_eq!(config.volume_target, 512);
-    assert_eq!(config.c_min, 1);
+    assert_eq!(config.c_min, 3);
     assert_eq!(config.fee_rate, 5); // µT/gram
     assert!(!config.scenarios.is_empty());
+    assert_eq!(config.scenarios.len(), 9); // B0 + S0-S7
 }
 
-/// Test that config can be loaded from a TOML file
 #[test]
 fn test_config_from_toml() {
     let toml_content = r#"
-network = "esmeralda"
 base_node_http = "http://127.0.0.1:18143"
-a_fund = 500_000_000
+a_fund = 5_000_000_000
 volume_target = 256
 c_min = 2
 fee_rate = 10
 scenarios = ["B0", "S0", "S1"]
+modes = ["old", "new"]
 "#;
 
     let config: HarnessConfig = toml::from_str(toml_content).expect("Failed to parse TOML");
 
-    assert_eq!(config.network, "esmeralda");
     assert_eq!(config.base_node_http, "http://127.0.0.1:18143");
-    assert_eq!(config.a_fund, 500_000_000);
+    assert_eq!(config.a_fund, 5_000_000_000);
     assert_eq!(config.volume_target, 256);
     assert_eq!(config.c_min, 2);
     assert_eq!(config.fee_rate, 10);
     assert_eq!(config.scenarios, vec!["B0", "S0", "S1"]);
+    assert_eq!(config.modes, vec!["old", "new"]);
 }
 
-/// Test that invalid network names are rejected during validation
 #[test]
-fn test_config_validation_network() {
+fn test_config_validation_invalid_scenario() {
     let toml_content = r#"
-network = "invalid_network"
+scenarios = ["B0", "INVALID_SCENARIO"]
+modes = ["old"]
 "#;
 
     let config: HarnessConfig = toml::from_str(toml_content).expect("Failed to parse TOML");
-
-    // Should fail validation for invalid network
     assert!(config.validate().is_err());
 }
 
-/// Test that zero funding amount is rejected
 #[test]
-fn test_config_validation_funding() {
+fn test_config_validation_invalid_mode() {
     let toml_content = r#"
-network = "esmeralda"
+scenarios = ["B0"]
+modes = ["invalid_mode"]
+"#;
+
+    let config: HarnessConfig = toml::from_str(toml_content).expect("Failed to parse TOML");
+    assert!(config.validate().is_err());
+}
+
+#[test]
+fn test_config_validation_zero_funding() {
+    let toml_content = r#"
+scenarios = ["B0"]
+modes = ["old"]
 a_fund = 0
 "#;
 
     let config: HarnessConfig = toml::from_str(toml_content).expect("Failed to parse TOML");
-
-    // Should fail validation for zero funding
     assert!(config.validate().is_err());
 }
 
-/// Test that volume target must be positive
 #[test]
-fn test_config_validation_volume_target() {
+fn test_config_validation_zero_fee_rate() {
     let toml_content = r#"
-network = "esmeralda"
-volume_target = 0
-"#;
-
-    let config: HarnessConfig = toml::from_str(toml_content).expect("Failed to parse TOML");
-
-    // Should fail validation for zero volume target
-    assert!(config.validate().is_err());
-}
-
-/// Test that fee rate must be non-negative
-#[test]
-fn test_config_validation_fee_rate() {
-    let toml_content = r#"
-network = "esmeralda"
+scenarios = ["B0"]
+modes = ["old"]
 fee_rate = 0
 "#;
 
     let config: HarnessConfig = toml::from_str(toml_content).expect("Failed to parse TOML");
-
-    // Fee rate of 0 should be valid (free transactions)
-    assert!(config.validate().is_ok());
+    assert!(config.validate().is_err());
 }
 
-/// Test scenario result initialization
+#[test]
+fn test_config_load_missing_file_returns_default() {
+    let config = HarnessConfig::load("/nonexistent/path/config.toml")
+        .expect("Should return default when file missing");
+    assert_eq!(config.base_node_http, "http://127.0.0.1:18142");
+}
+
+// ============================================================================
+// Metrics tests
+// ============================================================================
+
 #[test]
 fn test_scenario_result_new() {
     let result = ScenarioResult::new("B0");
@@ -120,7 +119,6 @@ fn test_scenario_result_new() {
     assert!(result.failure_reasons.is_empty());
 }
 
-/// Test scenario result metrics recording
 #[test]
 fn test_scenario_result_metrics() {
     let mut result = ScenarioResult::new("S1");
@@ -133,103 +131,51 @@ fn test_scenario_result_metrics() {
 
     assert_eq!(result.success_count, 1);
     assert!((result.wall_clock_secs - 10.5).abs() < f64::EPSILON);
-    assert_eq!(result.metrics.get("blocks_scanned").unwrap().as_u64(), Some(100));
+    assert_eq!(
+        result.metrics.get("blocks_scanned").unwrap().as_u64(),
+        Some(100)
+    );
 }
 
-/// Test benchmark result structure
 #[test]
-fn test_benchmark_result() {
-    let mut result = BenchmarkResult::new();
-    result.mode = "old_wallet".to_string();
-    result.network = "esmeralda".to_string();
+fn test_mode_result_structure() {
+    let mut result = ModeResult {
+        mode: "old_wallet".to_string(),
+        scenarios: HashMap::new(),
+    };
 
     assert_eq!(result.mode, "old_wallet");
-    assert_eq!(result.network, "esmeralda");
     assert!(result.scenarios.is_empty());
-    assert!((result.total_wall_clock_secs - 0.0).abs() < f64::EPSILON);
 }
 
-/// Test result profile generation
 #[test]
-fn test_result_profile() {
-    let mut profile = ResultProfile::new();
-    profile.add_mode_result("old_wallet", &BenchmarkResult::new());
-    profile.add_mode_result("new_wallet", &BenchmarkResult::new());
+fn test_result_profile_new() {
+    let env = EnvironmentInfo::collect().expect("Failed to collect environment info");
+    let config = HarnessConfig::default();
+    let profile = ResultProfile::new(env, config);
 
-    assert_eq!(profile.results.len(), 2);
+    assert!(profile.mode_results.is_empty());
+    assert_eq!(profile.total_duration_secs, 0.0);
 }
 
-/// Test that config supports all standard networks
 #[test]
-fn test_config_networks() {
-    let networks = vec!["esmeralda", "mainnet", "local"];
+fn test_result_profile_add_mode() {
+    let env = EnvironmentInfo::collect().expect("Failed to collect environment info");
+    let config = HarnessConfig::default();
+    let mut profile = ResultProfile::new(env, config);
 
-    for network in networks {
-        let toml_content = format!(r#"network = "{}""#, network);
-        let config: HarnessConfig = toml::from_str(&toml_content).expect("Failed to parse TOML");
-        assert_eq!(config.network, network);
-    }
+    let mode_result = ModeResult {
+        mode: "test_mode".to_string(),
+        scenarios: HashMap::new(),
+    };
+    profile.add_mode_results("test_mode".to_string(), mode_result.clone());
+
+    assert_eq!(profile.mode_results.len(), 1);
+    assert!(profile.mode_results.contains_key("test_mode"));
 }
 
-/// Test that seed words can be provided in config
 #[test]
-fn test_config_seed_words() {
-    let toml_content = r#"
-network = "esmeralda"
-seed_words_old = ["abandon", "ability", "able", "about", "above", "absent", "absorb", "abstract", "absurd", "abuse", "access", "account"]
-"#;
-
-    let config: HarnessConfig = toml::from_str(toml_content).expect("Failed to parse TOML");
-
-    assert_eq!(config.seed_words_old.unwrap().len(), 12);
-}
-
-/// Test concurrent batch configuration
-#[test]
-fn test_concurrent_batches() {
-    let toml_content = r#"
-network = "esmeralda"
-concurrent_batches = [8, 16, 32, 64, 128]
-"#;
-
-    let config: HarnessConfig = toml::from_str(toml_content).expect("Failed to parse TOML");
-
-    assert_eq!(config.concurrent_batches, vec![8, 16, 32, 64, 128]);
-}
-
-/// Test S5 payment processor parameters
-#[test]
-fn test_s5_parameters() {
-    let toml_content = r#"
-network = "esmeralda"
-s5_m = 100
-s5_k = 10
-"#;
-
-    let config: HarnessConfig = toml::from_str(toml_content).expect("Failed to parse TOML");
-
-    assert_eq!(config.s5_m, 100);
-    assert_eq!(config.s5_k, 10);
-}
-
-/// Test that doubling rounds and fan-out are configurable
-#[test]
-fn test_doubling_and_fanout() {
-    let toml_content = r#"
-network = "esmeralda"
-doubling_rounds = 8
-fanout_outputs_per_tx = 4
-"#;
-
-    let config: HarnessConfig = toml::from_str(toml_content).expect("Failed to parse TOML");
-
-    assert_eq!(config.doubling_rounds, 8);
-    assert_eq!(config.fanout_outputs_per_tx, 4);
-}
-
-/// Test scenario ID validation
-#[test]
-fn test_valid_scenario_ids() {
+fn test_valid_scenarios() {
     let valid_scenarios = vec!["B0", "S0", "S1", "S2", "S3", "S4", "S5", "S6", "S7"];
 
     for scenario in &valid_scenarios {
@@ -238,7 +184,23 @@ fn test_valid_scenario_ids() {
     }
 }
 
-/// Test metrics serialization to JSON
+#[test]
+fn test_valid_modes() {
+    let valid_modes = vec!["old", "new", "payment_processor"];
+
+    for mode in &valid_modes {
+        let result = ModeResult {
+            mode: mode.to_string(),
+            scenarios: HashMap::new(),
+        };
+        assert_eq!(result.mode, *mode);
+    }
+}
+
+// ============================================================================
+// Serialization tests
+// ============================================================================
+
 #[test]
 fn test_metrics_json_serialization() {
     let mut metrics: HashMap<String, serde_json::Value> = HashMap::new();
@@ -255,49 +217,102 @@ fn test_metrics_json_serialization() {
     assert_eq!(parsed.get("success").unwrap().as_bool(), Some(true));
 }
 
-/// Test that result profile can be serialized to JSON
 #[test]
 fn test_result_profile_json() {
-    let mut profile = ResultProfile::new();
-    let mut result = BenchmarkResult::new();
-    result.mode = "test_mode".to_string();
-    profile.add_mode_result("test_mode", &result);
+    let env = EnvironmentInfo::collect().expect("Failed to collect environment info");
+    let config = HarnessConfig::default();
+    let mut profile = ResultProfile::new(env, config);
+
+    let mode_result = ModeResult {
+        mode: "test_mode".to_string(),
+        scenarios: HashMap::new(),
+    };
+    profile.add_mode_results("test_mode".to_string(), mode_result);
 
     let json = serde_json::to_string_pretty(&profile).expect("Failed to serialize profile");
     assert!(json.contains("test_mode"));
 }
 
-/// Test config file path resolution
-#[test]
-fn test_config_file_path() {
-    // Test that config can be loaded from a file path
-    let config_path = PathBuf::from("config.example.toml");
+// ============================================================================
+// Configuration parameter tests
+// ============================================================================
 
-    if config_path.exists() {
-        let config = HarnessConfig::load(&config_path).expect("Failed to load config from file");
-        assert!(!config.network.is_empty());
-    }
+#[test]
+fn test_concurrent_batches() {
+    let toml_content = r#"
+scenarios = ["B0"]
+modes = ["old"]
+concurrent_batches = [8, 16, 32, 64, 128]
+"#;
+
+    let config: HarnessConfig = toml::from_str(toml_content).expect("Failed to parse TOML");
+    assert_eq!(config.concurrent_batches, vec![8, 16, 32, 64, 128]);
 }
 
-/// Test that harness supports multiple wallet modes
 #[test]
-fn test_wallet_modes() {
-    let modes = vec!["old_wallet", "new_wallet", "payment_processor"];
+fn test_s5_parameters() {
+    let toml_content = r#"
+scenarios = ["B0"]
+modes = ["old"]
+s5_m = 100
+s5_k = 10
+"#;
 
-    for mode in &modes {
-        let mut result = BenchmarkResult::new();
-        result.mode = mode.to_string();
-        assert_eq!(result.mode, *mode);
-    }
+    let config: HarnessConfig = toml::from_str(toml_content).expect("Failed to parse TOML");
+    assert_eq!(config.s5_m, 100);
+    assert_eq!(config.s5_k, 10);
 }
 
-/// Test delta calculations (required by bounty)
+#[test]
+fn test_doubling_and_fanout() {
+    let toml_content = r#"
+scenarios = ["B0"]
+modes = ["old"]
+doubling_rounds = 8
+fanout_outputs_per_tx = 4
+"#;
+
+    let config: HarnessConfig = toml::from_str(toml_content).expect("Failed to parse TOML");
+    assert_eq!(config.doubling_rounds, 8);
+    assert_eq!(config.fanout_outputs_per_tx, 4);
+}
+
+#[test]
+fn test_seed_words_config() {
+    let toml_content = r#"
+scenarios = ["B0"]
+modes = ["old"]
+seed_words_old = ["abandon", "ability", "able", "about", "above", "absent", "absorb", "abstract", "absurd", "abuse", "access", "account"]
+"#;
+
+    let config: HarnessConfig = toml::from_str(toml_content).expect("Failed to parse TOML");
+    assert!(config.seed_words_old.is_some());
+    assert_eq!(config.seed_words_old.unwrap().len(), 12);
+}
+
+#[test]
+fn test_peer_seeds() {
+    let toml_content = r#"
+scenarios = ["B0"]
+modes = ["old"]
+peer_seeds = ["127.0.0.1:18142", "192.168.1.1:18142"]
+"#;
+
+    let config: HarnessConfig = toml::from_str(toml_content).expect("Failed to parse TOML");
+    assert_eq!(config.peer_seeds.len(), 2);
+    assert_eq!(config.peer_seeds[0], "127.0.0.1:18142");
+}
+
+// ============================================================================
+// Delta and throughput calculation tests (required by bounty)
+// ============================================================================
+
 #[test]
 fn test_delta_calculations() {
     // Simulate scan times for delta calculation
-    let b0_scan_time = 10.0;
-    let s2_genesis_scan_time = 25.0;
-    let s3_birthday_scan_time = 20.0;
+    let b0_scan_time: f64 = 10.0;
+    let s2_genesis_scan_time: f64 = 25.0;
+    let s3_birthday_scan_time: f64 = 20.0;
 
     let t_scan_genesis_b0 = s2_genesis_scan_time - b0_scan_time;
     let t_scan_birthday_b0 = s3_birthday_scan_time - b0_scan_time;
@@ -306,18 +321,16 @@ fn test_delta_calculations() {
     assert!((t_scan_birthday_b0 - 10.0).abs() < f64::EPSILON);
 }
 
-/// Test throughput multiplier calculation
 #[test]
 fn test_throughput_multiplier() {
-    let individual_total_time = 100.0;
-    let batch_total_time = 25.0;
+    let individual_total_time: f64 = 100.0;
+    let batch_total_time: f64 = 25.0;
 
     let throughput_multiplier = individual_total_time / batch_total_time;
 
     assert!((throughput_multiplier - 4.0).abs() < f64::EPSILON);
 }
 
-/// Test fee efficiency calculation
 #[test]
 fn test_fee_efficiency() {
     let s5_m = 100u64;
@@ -330,4 +343,28 @@ fn test_fee_efficiency() {
     assert_eq!(fee_per_recipient_batch, 5_000);
     assert_eq!(fee_per_recipient_individual, 10_000);
     assert!(fee_per_recipient_batch < fee_per_recipient_individual);
+}
+
+// ============================================================================
+// Wallet versions and environment tests
+// ============================================================================
+
+#[test]
+fn test_wallet_versions() {
+    let config = HarnessConfig::default();
+
+    // Check that wallet versions are set
+    assert!(!config.wallet_versions.old_wallet.is_empty());
+    assert!(!config.wallet_versions.new_wallet.is_empty());
+    assert!(!config.wallet_versions.base_node.is_empty());
+}
+
+#[test]
+fn test_environment_collection() {
+    let env = EnvironmentInfo::collect().expect("Failed to collect environment info");
+
+    assert!(!env.cpu_model.is_empty());
+    assert!(env.cpu_count > 0);
+    assert!(env.total_ram_bytes > 0);
+    assert!(!env.os.is_empty());
 }

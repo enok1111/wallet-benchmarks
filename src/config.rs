@@ -108,7 +108,7 @@ pub struct HarnessConfig {
     pub seed_words_payment: Option<Vec<String>>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WalletVersions {
     /// minotari_console_wallet version/commit
     #[serde(default = "default_old_wallet_version")]
@@ -119,6 +119,16 @@ pub struct WalletVersions {
     /// Base node version/commit
     #[serde(default = "default_base_node_version")]
     pub base_node: String,
+}
+
+impl Default for WalletVersions {
+    fn default() -> Self {
+        Self {
+            old_wallet: default_old_wallet_version(),
+            new_wallet: default_new_wallet_version(),
+            base_node: default_base_node_version(),
+        }
+    }
 }
 
 impl Default for HarnessConfig {
