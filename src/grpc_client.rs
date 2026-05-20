@@ -111,14 +111,19 @@ impl OldWalletGrpcClient {
         Ok(response.into_inner())
     }
 
-    /// Get chain tip height from wallet (via get_state or similar)
+    /// Get chain tip height from wallet via GetState
     pub async fn get_tip_height(&mut self) -> Result<u64> {
-        debug!("Getting tip height via get_state");
-        
-        // Use get_balance response which includes tip height info
-        let balance = self.get_balance().await?;
-        // Extract tip height from balance response if available
-        Ok(0) // Placeholder - will be updated with actual implementation
+        debug!("Getting tip height via GetState");
+
+        let request = tonic::Request::new(minotari_app_grpc::tari_rpc::GetStateRequest {});
+        let response = self
+            .client_mut()
+            .get_state(request)
+            .await
+            .context("GetState RPC failed")?;
+
+        let state = response.into_inner();
+        Ok(state.tip_height)
     }
 
     /// Wait for the gRPC server to be ready by attempting a connection

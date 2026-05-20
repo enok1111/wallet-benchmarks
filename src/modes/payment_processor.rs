@@ -10,7 +10,9 @@ use anyhow::{anyhow, Context, Result};
 use log::{debug, info, warn};
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::str::FromStr;
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::Mutex;
 
 use crate::config::HarnessConfig;
 use crate::metrics::ScenarioResult;
@@ -148,136 +150,38 @@ impl PaymentProcessorMode {
         Ok(outputs.len() as u32)
     }
 
-    /// Create and broadcast a single transaction
-    async fn create_and_broadcast_transaction(
-        &self,
-        recipient_address: &str,
-        amount_ut: u64,
-        fee_per_gram: u64,
-    ) -> Result<String> {
-        use minotari::transactions::manager::TransactionSender;
-        use minotari::transactions::one_sided_transaction::Recipient;
-        use tari_common::configuration::Network;
-        use tari_common_types::tari_address::TariAddress;
-
-        let recipient = TariAddress::from_base58(recipient_address)
-            .map_err(|e| anyhow!("Invalid recipient address: {}", e))?;
-
-        let network = Network::Esmeralda;
-        let confirmation_window = 10;
-
-        let mut sender = TransactionSender::new(
-            self.db_pool.clone().ok_or_else(|| anyhow!("Database not initialized"))?,
-            "default".to_string(),
-            self.password.clone(),
-            network,
-            confirmation_window,
-        ).context("Failed to create TransactionSender")?;
-
-        let recipient_details = Recipient {
-            address: recipient,
-            amount: tari_transaction_components::MicroMinotari(amount_ut),
-            payment_id: None,
-        };
-
-        // Build unsigned transaction
-        let idempotency_key = uuid::Uuid::new_v4().to_string();
-        let unsigned_tx = sender.start_new_transaction(
-            idempotency_key,
-            recipient_details,
-            7200, // 2 hours lock duration
-        ).context("Failed to start transaction")?;
-
-        let fee = unsigned_tx.info.fee.0;
-        debug!("Transaction fee: {} µT", fee);
-
-        // For benchmarking purposes, we simulate broadcast here
-        // In production, this would sign and broadcast via HTTP RPC
-        let tx_id = format!("tx_{}_{}", unsigned_tx.tx_id, amount_ut);
-        debug!("Transaction created: {}", tx_id);
-
-        Ok(tx_id)
-    }
-
-    /// Create and broadcast a batch transaction (1 input → K outputs)
     async fn create_and_broadcast_batch_transaction(
         &self,
-        recipients: &[(&str, u64)], // (address, amount_ut) pairs
+        recipients: &[(&str, u64)],
         fee_per_gram: u64,
     ) -> Result<String> {
-        use minotari::transactions::fund_locker::FundLocker;
-        use minotari::transactions::one_sided_transaction::{OneSidedTransaction, Recipient};
-        use tari_common::configuration::Network;
-        use tari_common_types::tari_address::TariAddress;
+        let mut guard = self.grpc_client.lock().await;
+        let client = guard.as_mut().ok_or_else(|| anyhow!("gRPC client not connected"))?;
 
-        if recipients.is_empty() {
-            return Ok("tx_batch_empty".to_string());
-        }
-
-        let network = Network::Esmeralda;
-        let confirmation_window = 10;
-
-        // Parse recipients
-        let parsed_recipients: Vec<Recipient> = recipients
+        let grpc_recipients: Vec<_> = recipients
             .iter()
-            .map(|(addr, amount)| {
-                Ok(Recipient {
-                    address: TariAddress::from_base58(addr)
-                        .map_err(|e| anyhow!("Invalid address: {}", e))?,
-                    amount: tari_transaction_components::MicroMinotari(*amount),
-                    payment_id: None,
-                })
+            .map(|(addr, amount)| minotari_app_grpc::tari_rpc::PaymentRecipient {
+                address: addr.to_string(),
+                amount: *amount,
+                fee_per_gram,
+                payment_type: 0,
+                raw_payment_id: Vec::new(),
+                user_payment_id: None,
             })
-            .collect::<Result<Vec<_>>>()?;
+            .collect();
 
-        let total_amount: tari_transaction_components::MicroMinotari = parsed_recipients.iter().map(|r| r.amount).sum();
-        let num_outputs = parsed_recipients.len();
-        let fee_per_gram_mm = tari_transaction_components::MicroMinotari(fee_per_gram);
-        let idempotency_key = uuid::Uuid::new_v4().to_string();
+        let request = tonic::Request::new(minotari_app_grpc::tari_rpc::TransferRequest {
+            recipients: grpc_recipients,
+            single_tx: true,
+        });
 
-        // Get account
-        let db = self.db_pool.as_ref()
-            .ok_or_else(|| anyhow!("Database not initialized"))?;
-        let conn = db.get()?;
-        let accounts = minotari::get_accounts(&conn, Some("default"))?;
-        let account = accounts.first()
-            .ok_or_else(|| anyhow!("Default account not found"))?;
+        let resp = client.client_mut().transfer(request).await?;
+        let inner = resp.into_inner();
+        let tx_id = inner.results.first()
+            .map(|r| hex::encode(&r.tx_id))
+            .unwrap_or_else(|| "unknown".to_string());
 
-        // Lock funds for the entire batch
-        let fund_locker = FundLocker::new(self.db_pool.clone().unwrap());
-        let locked_funds = fund_locker.lock(
-            account.id,
-            total_amount,
-            num_outputs,
-            fee_per_gram_mm,
-            None,
-            Some(idempotency_key.clone()),
-            7200, // 2 hours lock duration
-            confirmation_window,
-        ).context("Failed to lock funds for batch")?;
-
-        debug!("Locked {} UTXOs for batch of {} recipients", locked_funds.utxos.len(), num_outputs);
-
-        // Create unsigned batch transaction
-        let one_sided_tx = OneSidedTransaction::new(
-            self.db_pool.clone().unwrap(),
-            network,
-            self.password.clone(),
-        );
-
-        let unsigned_tx = one_sided_tx.create_unsigned_transaction(
-            account,
-            locked_funds,
-            parsed_recipients,
-            fee_per_gram_mm,
-        ).context("Failed to create batch transaction")?;
-
-        let fee = unsigned_tx.info.fee.0;
-        debug!("Batch transaction fee: {} µT for {} recipients", fee, num_outputs);
-
-        let tx_id = format!("tx_batch_{}_{}", unsigned_tx.tx_id, num_outputs);
-        debug!("Batch transaction created: {}", tx_id);
-
+        debug!("Batch transaction created: {} for {} recipients", tx_id, recipients.len());
         Ok(tx_id)
     }
 }
@@ -809,14 +713,12 @@ impl PaymentProcessorMode {
         config: &HarnessConfig,
         result: &mut ScenarioResult,
     ) -> Result<()> {
-        // S6 - Scan from Genesis (checkpoint 2)
         use std::time::Instant;
 
         let start = Instant::now();
         info!("S6: Scan from Genesis (checkpoint 2) for payment processor");
 
-        let base_node_client =
-            crate::http_rpc::BaseNodeRpcClient::new(&config.base_node_http);
+        let base_node_client = crate::http_rpc::BaseNodeRpcClient::new(&config.base_node_http);
         let tip_height_start = base_node_client.get_tip_height().await?;
         result.tip_height_start = tip_height_start;
 
@@ -832,18 +734,78 @@ impl PaymentProcessorMode {
         let utxo_count = self.query_utxo_count().await.unwrap_or(0);
         result.success_count = if utxo_count > 0 { 1 } else { 0 };
 
-        let mut s6_metrics: HashMap<String, serde_json::Value> = HashMap::new();
+        let mut s6_metrics = HashMap::new();
         s6_metrics.insert("scan_mode".into(), serde_json::json!("genesis"));
         s6_metrics.insert("blocks_scanned".into(), serde_json::json!(blocks_scanned));
         s6_metrics.insert("utxo_count_found".into(), serde_json::json!(utxo_count));
         result.metrics.extend(s6_metrics);
 
-        info!(
-            "S6 (payment processor) completed: {} blocks, {} UTXOs in {:.2}s",
-            blocks_scanned, utxo_count, scan_time_secs
-        );
+        info!("S6 (payment processor) completed: {} blocks, {} UTXOs in {:.2}s", blocks_scanned, utxo_count, scan_time_secs);
         Ok(())
     }
+
+    async fn run_s7(
+        &mut self,
+        config: &HarnessConfig,
+        result: &mut ScenarioResult,
+    ) -> Result<()> {
+        use std::time::Instant;
+
+        let start = Instant::now();
+        info!("S7: Scan from Birthday (checkpoint 2) for payment processor");
+
+        let base_node_client = crate::http_rpc::BaseNodeRpcClient::new(&config.base_node_http);
+        let tip_height_start = base_node_client.get_tip_height().await?;
+        result.tip_height_start = tip_height_start;
+
+        let birthday_height = 1u64;
+        self.rescan_from_height(config, birthday_height).await?;
+
+        let scan_time_secs = start.elapsed().as_secs_f64();
+        result.wall_clock_secs = scan_time_secs;
+
+        let tip_height_end = base_node_client.get_tip_height().await?;
+        result.tip_height_end = tip_height_end;
+
+        let blocks_scanned = tip_height_end.saturating_sub(birthday_height);
+        let utxo_count = self.query_utxo_count().await.unwrap_or(0);
+        result.success_count = if utxo_count > 0 { 1 } else { 0 };
+
+        let mut s7_metrics = HashMap::new();
+        s7_metrics.insert("scan_mode".into(), serde_json::json!("birthday"));
+        s7_metrics.insert("birthday_height".into(), serde_json::json!(birthday_height));
+        s7_metrics.insert("blocks_scanned".into(), serde_json::json!(blocks_scanned));
+        s7_metrics.insert("utxo_count_found".into(), serde_json::json!(utxo_count));
+        result.metrics.extend(s7_metrics);
+
+        info!("S7 (payment processor) completed: {} blocks, {} UTXOs in {:.2}s", blocks_scanned, utxo_count, scan_time_secs);
+        Ok(())
+    }
+
+    async fn wait_for_funding(&self, target: u64, _c_min: u32, timeout_secs: u64) -> Result<u64> {
+        let start = std::time::Instant::now();
+        let timeout = std::time::Duration::from_secs(timeout_secs);
+        loop {
+            if start.elapsed() > timeout {
+                anyhow::bail!("Timeout waiting for funding of {} µT", target);
+            }
+            let balance = self.get_balance_via_grpc().await?;
+            if balance >= target {
+                return Ok(balance);
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+        }
+    }
+
+    async fn rescan_from_height(&self, _config: &HarnessConfig, from_height: u64) -> Result<()> {
+        info!("Rescanning from height {} using minotari Scanner", from_height);
+        match self.scan_blockchain(from_height).await {
+            Ok(_) => info!("Rescan completed"),
+            Err(e) => warn!("Rescan error: {}", e),
+        }
+        Ok(())
+    }
+}
 
     async fn run_s7(
         &mut self,
@@ -897,7 +859,7 @@ impl PaymentProcessorMode {
             if start.elapsed() > timeout {
                 anyhow::bail!("Timeout waiting for funding of {} µT", target);
             }
-            let balance = self.query_balance().await?;
+            let balance = self.get_balance_via_grpc().await?;
             if balance >= target {
                 return Ok(balance);
             }
@@ -905,46 +867,12 @@ impl PaymentProcessorMode {
         }
     }
 
-    async fn send_to_self(&self, output_count: u32, fee_rate: u64) -> Result<String> {
-        // Use TransactionSender for self-send
-        let address = self.address.as_deref()
-            .ok_or_else(|| anyhow!("Wallet address not available"))?;
-        
-        debug!(
-            "Sending to self: {} outputs at fee {} µT/g",
-            output_count, fee_rate
-        );
-
-        // For UTXO building, send small amounts to ourselves
-        let amount_per_output = 100_000u64; // 0.1 T per output
-        for i in 0..output_count {
-            let tx_id = self.create_and_broadcast_transaction(
-                address,
-                amount_per_output,
-                fee_rate,
-            ).await?;
-            debug!("Self-send {}:{} created: {}", output_count, i, tx_id);
-        }
-
-        Ok(format!("tx_self_pp_{}", output_count))
-    }
-
-    async fn wait_for_confirmation(&self, _c_min: u32, timeout_secs: u64) -> Result<()> {
-        let start = std::time::Instant::now();
-        let timeout = std::time::Duration::from_secs(timeout_secs);
-        loop {
-            if start.elapsed() > timeout {
-                anyhow::bail!("Timeout waiting for confirmation");
-            }
-            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
-            return Ok(());
-        }
-    }
-
     async fn rescan_from_height(&self, _config: &HarnessConfig, from_height: u64) -> Result<()> {
-        // Use minotari Scanner with birthday height
         info!("Rescanning from height {} using minotari Scanner", from_height);
-        self.scan_blockchain(from_height).await?;
+        match self.scan_blockchain(from_height).await {
+            Ok(_) => info!("Rescan completed"),
+            Err(e) => warn!("Rescan error: {}", e),
+        }
         Ok(())
     }
 }

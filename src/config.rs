@@ -167,7 +167,7 @@ fn default_base_node_grpc() -> String {
 }
 
 fn default_base_node_http() -> String {
-    "http://127.0.0.1:18142".to_string()
+    "http://127.0.0.1:18143".to_string()
 }
 
 fn default_old_wallet_path() -> String {

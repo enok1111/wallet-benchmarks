@@ -154,6 +154,68 @@ impl ResultProfile {
         self.mode_results.insert(mode, results);
     }
 
+    /// Compute derived metrics and deltas across scenarios and modes
+    pub fn compute_deltas(&mut self) {
+        let mut deltas: HashMap<String, serde_json::Value> = HashMap::new();
+
+        for (mode_name, mode_result) in &self.mode_results {
+            let scenarios = &mode_result.scenarios;
+
+            if let (Some(b0), Some(s2)) = (scenarios.get("B0"), scenarios.get("S2")) {
+                let b0_scan = b0.wall_clock_secs;
+                let s2_scan = s2.wall_clock_secs;
+                deltas.insert(
+                    format!("{}.t_scan_s2_minus_b0_secs", mode_name),
+                    serde_json::json!(s2_scan - b0_scan),
+                );
+            }
+
+            if let (Some(b0), Some(s3)) = (scenarios.get("B0"), scenarios.get("S3")) {
+                deltas.insert(
+                    format!("{}.t_scan_s3_minus_b0_secs", mode_name),
+                    serde_json::json!(s3.wall_clock_secs - b0.wall_clock_secs),
+                );
+            }
+
+            if let (Some(s2), Some(s6)) = (scenarios.get("S2"), scenarios.get("S6")) {
+                deltas.insert(
+                    format!("{}.t_scan_s6_minus_s2_secs", mode_name),
+                    serde_json::json!(s6.wall_clock_secs - s2.wall_clock_secs),
+                );
+            }
+
+            if let (Some(s6), Some(b0)) = (scenarios.get("S6"), scenarios.get("B0")) {
+                if b0.wall_clock_secs > 0.0 {
+                    deltas.insert(
+                        format!("{}.scan_slowdown_s6_over_b0", mode_name),
+                        serde_json::json!(s6.wall_clock_secs / b0.wall_clock_secs),
+                    );
+                }
+            }
+        }
+
+        if let (Some(pp_s5), Some(old_s5)) = (
+            self.mode_results.get("payment_processor"),
+            self.mode_results.get("old"),
+        ) {
+            if let (Some(pp_result), Some(old_result)) = (
+                pp_s5.scenarios.get("S5"),
+                old_s5.scenarios.get("S5"),
+            ) {
+                let t_batch = pp_result.wall_clock_secs;
+                let t_individual = old_result.wall_clock_secs;
+                if t_batch > 0.0 {
+                    deltas.insert(
+                        "s5_throughput_multiplier".into(),
+                        serde_json::json!(t_individual / t_batch),
+                    );
+                }
+            }
+        }
+
+        self.computed_deltas = deltas;
+    }
+
     /// Save result profile to JSON file
     pub fn save(&self, path: &str) -> Result<()> {
         // Ensure output directory exists

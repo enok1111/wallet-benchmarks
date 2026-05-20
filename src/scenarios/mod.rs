@@ -48,9 +48,9 @@ pub async fn run_new_wallet_mode(config: &HarnessConfig) -> Result<ModeResult> {
     use crate::modes::new_wallet::NewWalletMode;
     use crate::modes::WalletMode;
 
-    // Keep TempDir alive to prevent directory leaks
     let temp_dir = tempfile::TempDir::new()?;
-    let mut mode = NewWalletMode::new(temp_dir.path().to_path_buf());
+    let grpc_port = config.old_wallet_grpc_base_port + 1;
+    let mut mode = NewWalletMode::new(temp_dir.path().to_path_buf(), grpc_port);
 
     // Initialize wallet
     mode.initialize(config).await?;
@@ -79,9 +79,9 @@ pub async fn run_payment_processor_mode(config: &HarnessConfig) -> Result<ModeRe
     use crate::modes::payment_processor::PaymentProcessorMode;
     use crate::modes::WalletMode;
 
-    // Keep TempDir alive to prevent directory leaks
     let temp_dir = tempfile::TempDir::new()?;
-    let mut mode = PaymentProcessorMode::new(temp_dir.path().to_path_buf());
+    let grpc_port = config.old_wallet_grpc_base_port + 2;
+    let mut mode = PaymentProcessorMode::new(temp_dir.path().to_path_buf(), grpc_port);
 
     // Initialize wallet
     mode.initialize(config).await?;

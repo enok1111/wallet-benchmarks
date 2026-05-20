@@ -92,6 +92,16 @@ async fn main() -> Result<()> {
         result_profile.add_mode_results(mode.clone(), mode_results);
     }
 
+    // Compute derived metrics and deltas
+    result_profile.compute_deltas();
+
+    // Record run end time and total duration
+    let run_end = chrono::Utc::now();
+    result_profile.run_end = Some(run_end);
+    if let Some(run_start) = result_profile.environment.run_start {
+        result_profile.total_duration_secs = (run_end - run_start).num_milliseconds() as f64 / 1000.0;
+    }
+
     // Save results
     let output_path = format!("{}/result_profile.json", cli.output_dir);
     result_profile.save(&output_path)?;

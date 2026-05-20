@@ -3,7 +3,7 @@
 
 # Esmeralda testnet base node addresses
 base_node_grpc = "http://127.0.0.1:18142"
-base_node_http = "http://127.0.0.1:18142"
+base_node_http = "http://127.0.0.1:18143"
 
 # Public Esmeralda testnet peer seeds (optional - wallet will auto-discover)
 peer_seeds = []
