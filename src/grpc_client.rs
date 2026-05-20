@@ -33,7 +33,7 @@ impl OldWalletGrpcClient {
     }
 
     /// Get a mutable reference to the inner client for gRPC calls
-    fn client_mut(&mut self) -> &mut WalletClient<tonic::transport::Channel> {
+    pub fn client_mut(&mut self) -> &mut WalletClient<tonic::transport::Channel> {
         &mut self.client
     }
 
@@ -123,7 +123,7 @@ impl OldWalletGrpcClient {
             .context("GetState RPC failed")?;
 
         let state = response.into_inner();
-        Ok(state.tip_height)
+        Ok(state.scanned_height)
     }
 
     /// Wait for the gRPC server to be ready by attempting a connection

@@ -84,6 +84,7 @@ impl NewWalletMode {
             &self.base_node_http,
             self.db_path.clone(),
             100,
+            10,
         )
         .mode(mode)
         .account("default")
@@ -105,8 +106,8 @@ impl NewWalletMode {
         let balance = get_balance(&conn, self.account_id as i64)
             .context("Failed to query balance")?;
 
-        debug!("Balance: {} µT available", balance.available);
-        Ok(balance.available)
+        debug!("Balance: {} µT available", balance.available.0);
+        Ok(balance.available.0)
     }
 
     async fn query_utxo_count(&self) -> Result<u32> {
@@ -161,7 +162,7 @@ impl NewWalletMode {
         let resp = client.client_mut().transfer(request).await?;
         let inner = resp.into_inner();
         let tx_id = inner.results.first()
-            .map(|r| hex::encode(&r.tx_id))
+            .map(|r| r.transaction_id.to_string())
             .unwrap_or_else(|| "unknown".to_string());
         Ok(tx_id)
     }
@@ -171,7 +172,7 @@ impl NewWalletMode {
         let client = guard.as_mut().ok_or_else(|| anyhow!("gRPC client not connected"))?;
         let resp = client.transfer(destination, amount, fee_per_gram).await?;
         let tx_id = resp.results.first()
-            .map(|r| hex::encode(&r.tx_id))
+            .map(|r| r.transaction_id.to_string())
             .unwrap_or_else(|| "unknown".to_string());
         Ok(tx_id)
     }
@@ -584,7 +585,7 @@ impl NewWalletMode {
                         match client.transfer(&rcpt, 100_000, fee).await {
                             Ok(resp) => {
                                 let tx_id = resp.results.first()
-                                    .map(|r| hex::encode(&r.tx_id))
+                                    .map(|r| r.transaction_id.to_string())
                                     .unwrap_or_else(|| "unknown".to_string());
                                 (i, true, tx_id, start_tx.elapsed().as_micros() as u64)
                             }

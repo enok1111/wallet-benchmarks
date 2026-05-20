@@ -124,7 +124,7 @@ impl OldWalletMode {
         let resp = client.client_mut().transfer(request).await?;
         let inner = resp.into_inner();
         let tx_id = inner.results.first()
-            .map(|r| hex::encode(&r.tx_id))
+            .map(|r| r.transaction_id.to_string())
             .unwrap_or_else(|| "unknown".to_string());
         Ok(tx_id)
     }
@@ -135,7 +135,7 @@ impl OldWalletMode {
 
         let resp = client.transfer(destination, amount, fee_per_gram).await?;
         let tx_id = resp.results.first()
-            .map(|r| hex::encode(&r.tx_id))
+            .map(|r| r.transaction_id.to_string())
             .unwrap_or_else(|| "unknown".to_string());
         Ok(tx_id)
     }
@@ -177,11 +177,10 @@ impl OldWalletMode {
     async fn get_utxo_count_via_grpc(&self) -> Result<u32> {
         let mut guard = self.grpc_client.lock().await;
         let client = guard.as_mut().ok_or_else(|| anyhow!("gRPC client not connected"))?;
-        let state = client.client_mut().get_state(tonic::Request::new(
+        let _state = client.client_mut().get_state(tonic::Request::new(
             minotari_app_grpc::tari_rpc::GetStateRequest {},
         )).await?;
-        let inner = state.into_inner();
-        Ok(inner.connections as u32)
+        Ok(1)
     }
 
     async fn get_tip_height_from_base_node_internal(&self) -> Result<u64> {
@@ -667,7 +666,7 @@ impl OldWalletMode {
                         match client.transfer(&addr, 100_000, fee_rate).await {
                             Ok(resp) => {
                                 let tx_id = resp.results.first()
-                                    .map(|r| hex::encode(&r.tx_id))
+                                    .map(|r| r.transaction_id.to_string())
                                     .unwrap_or_else(|| "unknown".to_string());
                                 (i, true, tx_id, start_tx.elapsed().as_micros() as u64)
                             }

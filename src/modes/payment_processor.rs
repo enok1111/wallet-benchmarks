@@ -20,45 +20,46 @@ use crate::modes::WalletMode;
 
 /// Payment processor mode implementation using batch transactions
 pub struct PaymentProcessorMode {
-    /// Data directory path for this wallet instance
     data_dir: PathBuf,
-    /// Database file path
     db_path: PathBuf,
-    /// Wallet address (retrieved after initialization)
     address: Option<String>,
-    /// Seed words for this wallet
     seed_words: Vec<String>,
-    /// Password for wallet encryption
     password: String,
-    /// Base node HTTP RPC endpoint
     base_node_http: String,
-    /// Database connection pool
     db_pool: Option<minotari::db::SqlitePool>,
+    grpc_client: Arc<Mutex<Option<crate::grpc_client::OldWalletGrpcClient>>>,
+    grpc_address: String,
 }
 
 impl PaymentProcessorMode {
-    pub fn new(data_dir: PathBuf) -> Self {
+    pub fn new(data_dir: PathBuf, grpc_port: u16) -> Self {
         let db_path = data_dir.join("wallet.db");
+        let grpc_address = format!("127.0.0.1:{}", grpc_port);
         Self {
             data_dir,
             db_path,
             address: None,
             seed_words: Vec::new(),
             password: "benchmark_password_32chars_min".to_string(),
-            base_node_http: "http://127.0.0.1:18142".to_string(),
+            base_node_http: "http://127.0.0.1:18143".to_string(),
             db_pool: None,
+            grpc_client: Arc::new(Mutex::new(None)),
+            grpc_address,
         }
     }
 
-   /// Generate a unique 12-word seed phrase for this mode.
     fn generate_seed_words(mode_suffix: &str) -> Vec<String> {
-        let mut words = vec![
-            "abandon".to_string(), "ability".to_string(), "able".to_string(), "about".to_string(),
-            "above".to_string(), "absent".to_string(), "absorb".to_string(), "abstract".to_string(),
-            "absurd".to_string(), "abuse".to_string(), "access".to_string(),
+        let suffix = match mode_suffix {
+            "old" => "account",
+            "new" => "acquire",
+            "payment" => "actress",
+            _ => "across",
+        };
+        let words = [
+            "abandon", "ability", "able", "about", "above", "absent",
+            "absorb", "abstract", "absurd", "abuse", "access", suffix,
         ];
-        words.push(format!("{}{}", "accident", mode_suffix));
-        words
+        words.iter().map(|w| w.to_string()).collect()
     }
 
     /// Initialize the wallet database using minotari library
@@ -150,6 +151,105 @@ impl PaymentProcessorMode {
         Ok(outputs.len() as u32)
     }
 
+    async fn get_balance_via_grpc(&self) -> Result<u64> {
+        let mut guard = self.grpc_client.lock().await;
+        let client = guard.as_mut().ok_or_else(|| anyhow!("gRPC client not connected"))?;
+        let resp = client.get_balance().await?;
+        Ok(resp.available_balance)
+    }
+
+    async fn send_to_self_via_grpc(&self, output_count: u32, fee_per_gram: u64) -> Result<String> {
+        let address = self.address.as_deref().ok_or_else(|| anyhow!("Wallet address not available"))?;
+        let amount_per_output = 100_000u64;
+
+        let mut guard = self.grpc_client.lock().await;
+        let client = guard.as_mut().ok_or_else(|| anyhow!("gRPC client not connected"))?;
+
+        let recipients: Vec<_> = (0..output_count)
+            .map(|_| minotari_app_grpc::tari_rpc::PaymentRecipient {
+                address: address.to_string(),
+                amount: amount_per_output,
+                fee_per_gram,
+                payment_type: 0,
+                raw_payment_id: Vec::new(),
+                user_payment_id: None,
+            })
+            .collect();
+
+        let request = tonic::Request::new(minotari_app_grpc::tari_rpc::TransferRequest {
+            recipients,
+            single_tx: false,
+        });
+
+        let resp = client.client_mut().transfer(request).await?;
+        let inner = resp.into_inner();
+        let tx_id = inner.results.first()
+            .map(|r| r.transaction_id.to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+        Ok(tx_id)
+    }
+
+    async fn send_single_transfer_via_grpc(&self, destination: &str, amount: u64, fee_per_gram: u64) -> Result<String> {
+        let mut guard = self.grpc_client.lock().await;
+        let client = guard.as_mut().ok_or_else(|| anyhow!("gRPC client not connected"))?;
+        let resp = client.transfer(destination, amount, fee_per_gram).await?;
+        let tx_id = resp.results.first()
+            .map(|r| r.transaction_id.to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+        Ok(tx_id)
+    }
+
+    async fn wait_for_confirmation_via_grpc(&self, c_min: u32, timeout_secs: u64) -> Result<()> {
+        let start = std::time::Instant::now();
+        let timeout = Duration::from_secs(timeout_secs);
+
+        loop {
+            if start.elapsed() > timeout {
+                anyhow::bail!("Timeout waiting for confirmation (c_min={})", c_min);
+            }
+
+            let base_node_client = crate::http_rpc::BaseNodeRpcClient::new(&self.base_node_http);
+            let tip = base_node_client.get_tip_height().await?;
+
+            let mut guard = self.grpc_client.lock().await;
+            if let Some(ref mut client) = *guard {
+                match client.get_tip_height().await {
+                    Ok(wallet_tip) => {
+                        if wallet_tip > 0 && tip.saturating_sub(wallet_tip) < c_min as u64 {
+                            return Ok(());
+                        }
+                    }
+                    Err(e) => debug!("Could not check wallet tip: {}", e),
+                }
+            }
+            drop(guard);
+            tokio::time::sleep(Duration::from_secs(10)).await;
+        }
+    }
+
+    async fn wait_for_grpc_ready(&self, timeout_secs: u64) -> Result<()> {
+        let start = std::time::Instant::now();
+        let timeout = Duration::from_secs(timeout_secs);
+
+        loop {
+            if start.elapsed() > timeout {
+                return Err(anyhow!("Timeout waiting for gRPC server to be ready"));
+            }
+
+            match crate::grpc_client::OldWalletGrpcClient::connect(&self.grpc_address).await {
+                Ok(client) => {
+                    info!("Payment processor gRPC server ready at {}", self.grpc_address);
+                    let mut guard = self.grpc_client.lock().await;
+                    *guard = Some(client);
+                    return Ok(());
+                }
+                Err(_) => {
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                }
+            }
+        }
+    }
+
     async fn create_and_broadcast_batch_transaction(
         &self,
         recipients: &[(&str, u64)],
@@ -178,7 +278,7 @@ impl PaymentProcessorMode {
         let resp = client.client_mut().transfer(request).await?;
         let inner = resp.into_inner();
         let tx_id = inner.results.first()
-            .map(|r| hex::encode(&r.tx_id))
+            .map(|r| r.transaction_id.to_string())
             .unwrap_or_else(|| "unknown".to_string());
 
         debug!("Batch transaction created: {} for {} recipients", tx_id, recipients.len());
@@ -194,10 +294,8 @@ impl WalletMode for PaymentProcessorMode {
             self.data_dir.display()
         );
 
-        // Create data directory
         std::fs::create_dir_all(&self.data_dir)?;
 
-        // Generate or use provided seed words (unique per mode)
         if self.seed_words.is_empty() {
             self.seed_words = config
                 .seed_words_payment
@@ -205,11 +303,25 @@ impl WalletMode for PaymentProcessorMode {
                 .unwrap_or_else(|| Self::generate_seed_words("payment"));
         }
 
-        // Initialize wallet database with birthday height 0 (genesis)
+        self.base_node_http = config.base_node_http.clone();
+
         self.init_wallet_db(0).await?;
 
-        // Retrieve wallet address after initialization
-        self.address = Some("placeholder_address".to_string());
+        self.wait_for_grpc_ready(60).await?;
+
+        let mut guard = self.grpc_client.lock().await;
+        if let Some(ref mut client) = *guard {
+            match client.get_address().await {
+                Ok(response) => {
+                    self.address = Some(hex::encode(&response.interactive_address));
+                    info!("Wallet address: {}", self.address.as_ref().unwrap());
+                }
+                Err(e) => {
+                    warn!("Failed to get wallet address via gRPC: {}", e);
+                    self.address = Some("placeholder_address".to_string());
+                }
+            }
+        }
 
         info!("Payment processor initialized successfully");
         Ok(())
@@ -253,7 +365,7 @@ impl WalletMode for PaymentProcessorMode {
     }
 
     async fn get_balance(&self) -> Result<u64> {
-        self.query_balance().await
+        self.get_balance_via_grpc().await
     }
 
     async fn teardown(&mut self) -> Result<()> {
@@ -367,12 +479,12 @@ impl PaymentProcessorMode {
         // Doubling phase
         for round in 0..config.doubling_rounds {
             match self
-                .send_to_self(current_utxos * 2, config.fee_rate)
+                .send_to_self_via_grpc(current_utxos * 2, config.fee_rate)
                 .await
             {
                 Ok(tx_id) => {
                     info!("S1: Doubling round {} tx: {}", round + 1, tx_id);
-                    self.wait_for_confirmation(config.c_min, 300).await?;
+                    self.wait_for_confirmation_via_grpc(config.c_min, 300).await?;
                     current_utxos *= 2;
                 }
                 Err(e) => {
@@ -394,10 +506,10 @@ impl PaymentProcessorMode {
                     config.fanout_outputs_per_tx,
                     config.volume_target - current_utxos,
                 );
-                match self.send_to_self(outputs, config.fee_rate).await {
+                match self.send_to_self_via_grpc(outputs, config.fee_rate).await {
                     Ok(tx_id) => {
                         info!("S1: Fan-out round {} tx: {}", round + 1, tx_id);
-                        self.wait_for_confirmation(config.c_min, 300).await?;
+                        self.wait_for_confirmation_via_grpc(config.c_min, 300).await?;
                         current_utxos += outputs - 1;
                     }
                     Err(e) => {
@@ -510,7 +622,6 @@ impl PaymentProcessorMode {
         config: &HarnessConfig,
         result: &mut ScenarioResult,
     ) -> Result<()> {
-        // S4 - Concurrent Construction
         use std::time::Instant;
 
         let start = Instant::now();
@@ -527,28 +638,46 @@ impl PaymentProcessorMode {
             let batch_start = Instant::now();
             let n_val = *n_concurrent;
             let recipient = self.address.as_deref().unwrap_or("placeholder").to_string();
+            let fee = config.fee_rate;
+            let client_arc = Arc::clone(&self.grpc_client);
 
             let mut handles = Vec::new();
             for i in 0..n_val {
                 let rcpt = recipient.clone();
-                let fee = config.fee_rate;
+                let c_arc = Arc::clone(&client_arc);
                 let handle = tokio::spawn(async move {
-                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                    let _ = (rcpt, fee);
-                    (i, true, format!("tx_s4_pp_{}_{}", n_val, i))
+                    let start_tx = std::time::Instant::now();
+                    let mut guard = c_arc.lock().await;
+                    let outcome = if let Some(ref mut client) = *guard {
+                        match client.transfer(&rcpt, 100_000, fee).await {
+                            Ok(resp) => {
+                                let tx_id = resp.results.first()
+                                    .map(|r| r.transaction_id.to_string())
+                                    .unwrap_or_else(|| "unknown".to_string());
+                                (i, true, tx_id, start_tx.elapsed().as_micros() as u64)
+                            }
+                            Err(e) => (i, false, format!("error: {}", e), start_tx.elapsed().as_micros() as u64),
+                        }
+                    } else {
+                        (i, false, "no client".to_string(), start_tx.elapsed().as_micros() as u64)
+                    };
+                    outcome
                 });
                 handles.push(handle);
             }
 
             let mut batch_success = 0u32;
             let mut batch_failure = 0u32;
+            let mut construction_times: Vec<u64> = Vec::new();
             for handle in handles {
                 match handle.await {
-                    Ok((_idx, success, _tx_id)) => {
+                    Ok((_idx, success, tx_id, construction_us)) => {
+                        construction_times.push(construction_us);
                         if success {
                             batch_success += 1;
                         } else {
                             batch_failure += 1;
+                            result.failure_reasons.push(format!("S4 tx failed: {}", tx_id));
                         }
                     }
                     Err(e) => {
@@ -562,12 +691,23 @@ impl PaymentProcessorMode {
             total_success += batch_success;
             total_failure += batch_failure;
 
+            let max_serialization_gap_ms = if construction_times.len() > 1 {
+                let mut sorted = construction_times.clone();
+                sorted.sort();
+                sorted.windows(2)
+                    .map(|w| (w[1] - w[0]) as f64 / 1000.0)
+                    .fold(0.0_f64, f64::max)
+            } else {
+                0.0
+            };
+
             batch_results.push(serde_json::json!({
                 "n_concurrent": n_val,
                 "batch_wall_clock_secs": batch_time,
                 "success_count": batch_success,
                 "failure_count": batch_failure,
                 "success_rate": if n_val > 0 { batch_success as f64 / n_val as f64 } else { 0.0 },
+                "max_serialization_gap_ms": max_serialization_gap_ms,
             }));
         }
 
@@ -592,8 +732,6 @@ impl PaymentProcessorMode {
         config: &HarnessConfig,
         result: &mut ScenarioResult,
     ) -> Result<()> {
-        // S5 - Payment Processor Throughput (batch arm)
-        // HEADLINE SCENARIO: batch processing with s5_m recipients, s5_k batch size
         use std::time::Instant;
 
         let start = Instant::now();
@@ -608,12 +746,11 @@ impl PaymentProcessorMode {
         let mut total_fees: u64 = 0;
         let mut batch_times: Vec<serde_json::Value> = Vec::new();
 
-        // Process recipients in batches of s5_k
-        let mut batch_idx = 0u32;
         let recipients: Vec<String> = (0..config.s5_m)
             .map(|i| format!("{}_{}", recipient, i))
             .collect();
 
+        let mut batch_idx = 0u32;
         for chunk in recipients.chunks(config.s5_k as usize) {
             let batch_start = Instant::now();
             info!(
@@ -622,41 +759,25 @@ impl PaymentProcessorMode {
                 chunk.len()
             );
 
-            let mut handles = Vec::new();
-            for (i, rcpt) in chunk.iter().enumerate() {
-                let rcpt = rcpt.clone();
-                let amount = config.a_fund / config.s5_m as u64;
-                let fee = config.fee_rate;
-                let handle = tokio::spawn(async move {
-                    // TODO: Use TransactionSender for batch processing
-                    (i, true, format!("tx_s5_pp_batch{}_{}", batch_idx, i), fee)
-                });
-                handles.push(handle);
-            }
+            let batch_recipients: Vec<(&str, u64)> = chunk
+                .iter()
+                .map(|r| (r.as_str(), config.a_fund / config.s5_m as u64))
+                .collect();
 
-            let mut batch_success = 0u32;
-            let mut batch_failure = 0u32;
-            for handle in handles {
-                match handle.await {
-                    Ok((_idx, success, _tx_id, fee)) => {
-                        if success {
-                            batch_success += 1;
-                            total_fees += fee;
-                        } else {
-                            batch_failure += 1;
-                        }
-                    }
-                    Err(e) => {
-                        batch_failure += 1;
-                        warn!("S5: Batch task join error: {}", e);
-                    }
+            match self.create_and_broadcast_batch_transaction(&batch_recipients, config.fee_rate).await {
+                Ok(tx_id) => {
+                    info!("S5: Batch {} tx: {}", batch_idx + 1, tx_id);
+                    success_count += chunk.len() as u32;
+                    total_fees += config.fee_rate;
+                }
+                Err(e) => {
+                    failure_count += chunk.len() as u32;
+                    result.failure_reasons.push(format!("Batch {} failed: {}", batch_idx + 1, e));
+                    warn!("S5: Batch {} failed: {}", batch_idx + 1, e);
                 }
             }
 
             let batch_time = batch_start.elapsed().as_secs_f64();
-            success_count += batch_success;
-            failure_count += batch_failure;
-
             let tx_per_sec = if batch_time > 0.0 {
                 chunk.len() as f64 / batch_time
             } else {
@@ -667,18 +788,10 @@ impl PaymentProcessorMode {
                 "batch_idx": batch_idx,
                 "recipients": chunk.len(),
                 "batch_wall_clock_secs": batch_time,
-                "success_count": batch_success,
-                "failure_count": batch_failure,
+                "success_count": if batch_idx < (config.s5_m / config.s5_k) as u32 { config.s5_k } else { config.s5_m % config.s5_k },
                 "tx_per_sec": tx_per_sec,
             }));
 
-            info!(
-                "S5: Batch {} completed: {} success in {:.2}s ({:.1} tx/s)",
-                batch_idx + 1,
-                batch_success,
-                batch_time,
-                tx_per_sec
-            );
             batch_idx += 1;
         }
 
@@ -781,76 +894,6 @@ impl PaymentProcessorMode {
         info!("S7 (payment processor) completed: {} blocks, {} UTXOs in {:.2}s", blocks_scanned, utxo_count, scan_time_secs);
         Ok(())
     }
-
-    async fn wait_for_funding(&self, target: u64, _c_min: u32, timeout_secs: u64) -> Result<u64> {
-        let start = std::time::Instant::now();
-        let timeout = std::time::Duration::from_secs(timeout_secs);
-        loop {
-            if start.elapsed() > timeout {
-                anyhow::bail!("Timeout waiting for funding of {} µT", target);
-            }
-            let balance = self.get_balance_via_grpc().await?;
-            if balance >= target {
-                return Ok(balance);
-            }
-            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
-        }
-    }
-
-    async fn rescan_from_height(&self, _config: &HarnessConfig, from_height: u64) -> Result<()> {
-        info!("Rescanning from height {} using minotari Scanner", from_height);
-        match self.scan_blockchain(from_height).await {
-            Ok(_) => info!("Rescan completed"),
-            Err(e) => warn!("Rescan error: {}", e),
-        }
-        Ok(())
-    }
-}
-
-    async fn run_s7(
-        &mut self,
-        config: &HarnessConfig,
-        result: &mut ScenarioResult,
-    ) -> Result<()> {
-        // S7 - Scan from Birthday (checkpoint 2)
-        use std::time::Instant;
-
-        let start = Instant::now();
-        info!("S7: Scan from Birthday (checkpoint 2) for payment processor");
-
-        let base_node_client =
-            crate::http_rpc::BaseNodeRpcClient::new(&config.base_node_http);
-        let tip_height_start = base_node_client.get_tip_height().await?;
-        result.tip_height_start = tip_height_start;
-
-        let birthday_height = 1u64;
-        self.rescan_from_height(config, birthday_height).await?;
-
-        let scan_time_secs = start.elapsed().as_secs_f64();
-        result.wall_clock_secs = scan_time_secs;
-
-        let tip_height_end = base_node_client.get_tip_height().await?;
-        result.tip_height_end = tip_height_end;
-
-        let blocks_scanned = tip_height_end.saturating_sub(birthday_height);
-        let utxo_count = self.query_utxo_count().await.unwrap_or(0);
-        result.success_count = if utxo_count > 0 { 1 } else { 0 };
-
-        let mut s7_metrics: HashMap<String, serde_json::Value> = HashMap::new();
-        s7_metrics.insert("scan_mode".into(), serde_json::json!("birthday"));
-        s7_metrics.insert("birthday_height".into(), serde_json::json!(birthday_height));
-        s7_metrics.insert("blocks_scanned".into(), serde_json::json!(blocks_scanned));
-        s7_metrics.insert("utxo_count_found".into(), serde_json::json!(utxo_count));
-        result.metrics.extend(s7_metrics);
-
-        info!(
-            "S7 (payment processor) completed: {} blocks, {} UTXOs in {:.2}s",
-            blocks_scanned, utxo_count, scan_time_secs
-        );
-        Ok(())
-    }
-
-    // Helper methods for payment processor scenarios
 
     async fn wait_for_funding(&self, target: u64, _c_min: u32, timeout_secs: u64) -> Result<u64> {
         let start = std::time::Instant::now();
