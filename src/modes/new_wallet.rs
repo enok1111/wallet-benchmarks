@@ -21,7 +21,7 @@ use tokio::sync::Mutex;
 
 use crate::config::HarnessConfig;
 use crate::metrics::ScenarioResult;
-use crate::modes::WalletMode;
+use crate::modes::{WalletMode, WalletModeId};
 
 /// New wallet mode implementation using minotari library directly
 pub struct NewWalletMode {
@@ -53,6 +53,9 @@ impl NewWalletMode {
         }
     }
 
+    /// Initialize the wallet database. The birthday_height is stored in the DB's account
+    /// record (set by the gRPC wallet subprocess). The minotari Scanner reads the birthday
+    /// from the accounts table to determine its starting scan height.
     async fn init_wallet_db(&self, birthday_height: u64) -> Result<()> {
         info!(
             "Initializing wallet DB at {} with birthday height {}",
@@ -62,22 +65,43 @@ impl NewWalletMode {
 
         std::fs::create_dir_all(&self.data_dir)?;
 
-        let _ = minotari::db::init_db(self.db_path.clone())
+        let pool = minotari::db::init_db(self.db_path.clone())
             .map_err(|e| anyhow!("Failed to initialize minotari database: {}", e))?;
+
+        // If an account already exists (created by the gRPC wallet subprocess),
+        // update its birthday to match the requested scan start height.
+        if let Ok(conn) = pool.get() {
+            let birthday_val: i64 = birthday_height as i64;
+            if let Ok(count) = conn.query_row(
+                "SELECT COUNT(*) FROM accounts",
+                [],
+                |row| row.get::<_, i64>(0),
+            ) {
+                if count > 0 {
+                    let _ = conn.execute(
+                        "UPDATE accounts SET birthday = ?1 WHERE birthday != ?1",
+                        [birthday_val],
+                    );
+                    info!("Updated account birthday to {}", birthday_height);
+                }
+            }
+        }
 
         debug!("Wallet database initialized");
         Ok(())
     }
 
-    async fn scan_blockchain(&self, from_height: u64) -> Result<Vec<minotari::WalletEvent>> {
+    /// Scan the blockchain using the minotari Scanner.
+    /// The Scanner reads the starting height from the wallet's stored birthday in the DB
+    /// (accounts.birthday column), not from the `_from_height` parameter. For genesis
+    /// rescans, call `rescan_from_height` which adjusts the birthday in the DB before scanning.
+    async fn scan_blockchain(&self) -> Result<Vec<minotari::WalletEvent>> {
         use minotari::{Scanner, ScanMode};
 
         info!(
-            "Scanning blockchain via {} from height {}",
-            self.base_node_http, from_height
+            "Scanning blockchain via {}",
+            self.base_node_http,
         );
-
-        let mode = ScanMode::Full;
 
         let (events, _more_blocks) = Scanner::new(
             &self.password,
@@ -86,7 +110,7 @@ impl NewWalletMode {
             100,
             10,
         )
-        .mode(mode)
+        .mode(ScanMode::Full)
         .account("default")
         .run()
         .await
@@ -180,27 +204,29 @@ impl NewWalletMode {
     async fn wait_for_confirmation_via_grpc(&self, c_min: u32, timeout_secs: u64) -> Result<()> {
         let start = std::time::Instant::now();
         let timeout = Duration::from_secs(timeout_secs);
+        let base_node_client = crate::http_rpc::BaseNodeRpcClient::new(&self.base_node_http);
+        let broadcast_tip = base_node_client.get_tip_height().await?;
 
         loop {
             if start.elapsed() > timeout {
                 anyhow::bail!("Timeout waiting for confirmation (c_min={})", c_min);
             }
 
-            let base_node_client = crate::http_rpc::BaseNodeRpcClient::new(&self.base_node_http);
-            let tip = base_node_client.get_tip_height().await?;
-
-            let mut guard = self.grpc_client.lock().await;
-            if let Some(ref mut client) = *guard {
-                match client.get_tip_height().await {
-                    Ok(wallet_tip) => {
-                        if wallet_tip > 0 && tip.saturating_sub(wallet_tip) < c_min as u64 {
-                            return Ok(());
-                        }
-                    }
-                    Err(e) => debug!("Could not check wallet tip: {}", e),
-                }
+            let current_tip = base_node_client.get_tip_height().await?;
+            if current_tip >= broadcast_tip + c_min as u64 {
+                debug!(
+                    "Confirmation reached: broadcast_tip={}, current_tip={}, c_min={}",
+                    broadcast_tip, current_tip, c_min
+                );
+                return Ok(());
             }
-            drop(guard);
+            debug!(
+                "Waiting for {} confirmations: broadcast_tip={}, current_tip={}, c_min={}",
+                current_tip.saturating_sub(broadcast_tip),
+                broadcast_tip,
+                current_tip,
+                c_min
+            );
             tokio::time::sleep(Duration::from_secs(10)).await;
         }
     }
@@ -228,13 +254,8 @@ impl NewWalletMode {
         }
     }
 
-    fn generate_seed_words(mode_suffix: &str) -> Vec<String> {
-        let suffix = match mode_suffix {
-            "old" => "account",
-            "new" => "acquire",
-            "payment" => "actress",
-            _ => "across",
-        };
+    fn generate_seed_words(mode_id: WalletModeId) -> Vec<String> {
+        let suffix = mode_id.suffix_word();
         let words = [
             "abandon", "ability", "able", "about", "above", "absent",
             "absorb", "abstract", "absurd", "abuse", "access", suffix,
@@ -254,7 +275,7 @@ impl WalletMode for NewWalletMode {
             self.seed_words = config
                 .seed_words_new
                 .clone()
-                .unwrap_or_else(|| Self::generate_seed_words("new"));
+                .unwrap_or_else(|| Self::generate_seed_words(WalletModeId::New));
         }
 
         self.base_node_http = config.base_node_http.clone();
@@ -343,7 +364,7 @@ impl NewWalletMode {
 
         info!("B0: Scanning from genesis to tip {} (library integration)", tip_height_start);
 
-        match self.scan_blockchain(0).await {
+        match self.scan_blockchain().await {
             Ok(events) => {
                 info!("B0 scan completed: {} events", events.len());
             }
@@ -799,9 +820,28 @@ impl NewWalletMode {
         }
     }
 
+    /// Rescan the blockchain. The Scanner reads the starting height from the account's
+    /// birthday in the DB. For a genesis rescan (from_height=0), we update the birthday
+    /// in the DB so the Scanner starts from block 0. For a birthday rescan, the existing
+    /// birthday (set by the gRPC wallet at creation time) is used.
     async fn rescan_from_height(&self, _config: &HarnessConfig, from_height: u64) -> Result<()> {
         info!("Rescanning from height {} using minotari Scanner", from_height);
-        match self.scan_blockchain(from_height).await {
+
+        // Update the account birthday in the DB so the Scanner starts from the correct height.
+        // The Scanner reads birthday from the accounts table to determine its start height.
+        if from_height == 0 {
+            if let Ok(pool) = minotari::db::init_db(self.db_path.clone()) {
+                if let Ok(conn) = pool.get() {
+                    let _ = conn.execute(
+                        "UPDATE accounts SET birthday = 0",
+                        [],
+                    );
+                    info!("Set account birthday to 0 for genesis rescan");
+                }
+            }
+        }
+
+        match self.scan_blockchain().await {
             Ok(events) => info!("Rescan completed: {} events", events.len()),
             Err(e) => warn!("Rescan error: {}", e),
         }

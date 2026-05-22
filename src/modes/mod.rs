@@ -39,6 +39,24 @@ pub trait WalletMode {
     async fn teardown(&mut self) -> Result<()>;
 }
 
+/// Identifies which wallet mode is active
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WalletModeId {
+    Old,
+    New,
+    PaymentProcessor,
+}
+
+impl WalletModeId {
+    pub fn suffix_word(&self) -> &'static str {
+        match self {
+            WalletModeId::Old => "account",
+            WalletModeId::New => "acquire",
+            WalletModeId::PaymentProcessor => "actress",
+        }
+    }
+}
+
 /// Shared state for wallet mode execution
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WalletState {

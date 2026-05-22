@@ -16,20 +16,13 @@ use tokio::sync::Mutex;
 
 use crate::config::HarnessConfig;
 use crate::metrics::ScenarioResult;
-use crate::modes::WalletMode;
+use crate::modes::{WalletMode, WalletModeId};
 
 /// Valid BIP39 word list entries used for generating unique seeds per mode.
 /// Each mode gets a distinct 12th word from the official BIP39 list.
 const BIP39_BASE_WORDS: [&str; 11] = [
     "abandon", "ability", "able", "about", "above", "absent",
     "absorb", "abstract", "absurd", "abuse", "access",
-];
-
-/// Unique BIP39 suffix words per mode (all from the official BIP39 word list).
-const MODE_SUFFIX_WORDS: &[(&str, &str)] = &[
-    ("old", "account"),
-    ("new", "acquire"),
-    ("payment", "actress"),
 ];
 
 /// Old wallet mode implementation using minotari_console_wallet gRPC interface
@@ -57,14 +50,9 @@ impl OldWalletMode {
         }
     }
 
-    fn generate_seed_words(mode_suffix: &str) -> Vec<String> {
-        let suffix = MODE_SUFFIX_WORDS
-            .iter()
-            .find(|(mode, _)| *mode == mode_suffix)
-            .map(|(_, word)| *word)
-            .unwrap_or("across");
+    fn generate_seed_words(mode_id: WalletModeId) -> Vec<String> {
         let mut words: Vec<String> = BIP39_BASE_WORDS.iter().map(|w| w.to_string()).collect();
-        words.push(suffix.to_string());
+        words.push(mode_id.suffix_word().to_string());
         words
     }
 
@@ -143,33 +131,27 @@ impl OldWalletMode {
     async fn wait_for_confirmation_via_grpc(&self, c_min: u32, timeout_secs: u64) -> Result<()> {
         let start = std::time::Instant::now();
         let timeout = Duration::from_secs(timeout_secs);
+        let broadcast_tip = self.get_tip_height_from_base_node_internal().await?;
 
         loop {
             if start.elapsed() > timeout {
                 anyhow::bail!("Timeout waiting for confirmation (c_min={})", c_min);
             }
 
-            let tip = self.get_tip_height_from_base_node_internal().await?;
-            let mut guard = self.grpc_client.lock().await;
-            if let Some(client) = guard.as_mut() {
-                match client.get_tip_height().await {
-                    Ok(wallet_tip) => {
-                        if wallet_tip > 0 && tip.saturating_sub(wallet_tip) < c_min as u64 {
-                            debug!(
-                                "Confirmation reached: wallet_tip={}, chain_tip={}, c_min={}",
-                                wallet_tip, tip, c_min
-                            );
-                            return Ok(());
-                        }
-                        debug!(
-                            "Waiting for confirmation: wallet_tip={}, chain_tip={}, c_min={}",
-                            wallet_tip, tip, c_min
-                        );
-                    }
-                    Err(e) => debug!("Could not check wallet tip: {}", e),
-                }
+            let current_tip = self.get_tip_height_from_base_node_internal().await?;
+            if current_tip >= broadcast_tip + c_min as u64 {
+                debug!(
+                    "Confirmation reached: broadcast_tip={}, current_tip={}, c_min={}",
+                    broadcast_tip, current_tip, c_min
+                );
+                return Ok(());
             }
-            drop(guard);
+            debug!(
+                "Waiting for {} confirmations: broadcast_tip={}, c_min={}",
+                current_tip.saturating_sub(broadcast_tip),
+                broadcast_tip,
+                c_min
+            );
             tokio::time::sleep(Duration::from_secs(10)).await;
         }
     }
@@ -226,8 +208,7 @@ impl OldWalletMode {
             }
         }
 
-        let _ = from_height;
-        info!("Wallet restarted and ready for rescan");
+        info!("Wallet restarted and ready for rescan (from_height={})", from_height);
         Ok(())
     }
 }
@@ -243,7 +224,7 @@ impl WalletMode for OldWalletMode {
             self.seed_words = config
                 .seed_words_old
                 .clone()
-                .unwrap_or_else(|| Self::generate_seed_words("old"));
+                .unwrap_or_else(|| Self::generate_seed_words(WalletModeId::Old));
         }
 
         let mut cmd = Command::new(&config.old_wallet_binary);
