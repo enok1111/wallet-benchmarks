@@ -18,7 +18,7 @@ use wallet_benchmarks::metrics::{EnvironmentInfo, ModeResult, ResultProfile, Sce
 fn test_default_config_values() {
     let config = HarnessConfig::default();
 
-    assert_eq!(config.base_node_http, "http://127.0.0.1:18142");
+    assert_eq!(config.base_node_http, "http://127.0.0.1:18143");
     assert_eq!(config.a_fund, 10_000_000_000); // 10,000 tXTM in µT
     assert_eq!(config.volume_target, 512);
     assert_eq!(config.c_min, 3);
@@ -100,7 +100,7 @@ fee_rate = 0
 fn test_config_load_missing_file_returns_default() {
     let config = HarnessConfig::load("/nonexistent/path/config.toml")
         .expect("Should return default when file missing");
-    assert_eq!(config.base_node_http, "http://127.0.0.1:18142");
+    assert_eq!(config.base_node_http, "http://127.0.0.1:18143");
 }
 
 // ============================================================================
@@ -139,7 +139,7 @@ fn test_scenario_result_metrics() {
 
 #[test]
 fn test_mode_result_structure() {
-    let mut result = ModeResult {
+    let result = ModeResult {
         mode: "old_wallet".to_string(),
         scenarios: HashMap::new(),
     };
