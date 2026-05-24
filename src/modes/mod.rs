@@ -49,6 +49,7 @@ pub enum WalletModeId {
 }
 
 impl WalletModeId {
+    #[allow(dead_code)]
     pub fn suffix_word(&self) -> &'static str {
         match self {
             WalletModeId::Old => "account",
@@ -56,6 +57,38 @@ impl WalletModeId {
             WalletModeId::PaymentProcessor => "actress",
         }
     }
+}
+
+/// Generate valid Tari CipherSeed mnemonic words (24 words from BIP-39 wordlist).
+///
+/// Uses `tari_common_types::seeds::CipherSeed::random()` to generate a proper
+/// CipherSeed (versioned, with birthday, entropy, salt, MAC, and CRC32 checksum)
+/// and converts it to a mnemonic phrase. This is the **correct** way to generate
+/// seed words for Tari wallets — the previous hardcoded BIP39 words with mode
+/// suffix produced invalid mnemonics that would fail wallet validation.
+///
+/// Each call produces a fresh random seed (non-deterministic via kernel CSPRNG).
+pub fn generate_tari_seed_words() -> Vec<String> {
+    use tari_common_types::seeds::{
+        cipher_seed::CipherSeed,
+        mnemonic::{Mnemonic, MnemonicLanguage},
+    };
+
+    let seed = CipherSeed::random();
+    let mnemonic = seed
+        .to_mnemonic(MnemonicLanguage::English, None)
+        .expect("CipherSeed to mnemonic conversion is infallible for English wordlist");
+
+    let mut words = Vec::with_capacity(mnemonic.len());
+    for i in 0..mnemonic.len() {
+        words.push(
+            mnemonic
+                .get_word(i)
+                .expect("Valid index within seed word count")
+                .clone(),
+        );
+    }
+    words
 }
 
 /// Shared state for wallet mode execution

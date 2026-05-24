@@ -48,13 +48,8 @@ impl PaymentProcessorMode {
         }
     }
 
-    fn generate_seed_words(mode_id: WalletModeId) -> Vec<String> {
-        let suffix = mode_id.suffix_word();
-        let words = [
-            "abandon", "ability", "able", "about", "above", "absent",
-            "absorb", "abstract", "absurd", "abuse", "access", suffix,
-        ];
-        words.iter().map(|w| w.to_string()).collect()
+    fn generate_seed_words(_mode_id: WalletModeId) -> Vec<String> {
+        crate::modes::generate_tari_seed_words()
     }
 
     /// Initialize the wallet database using minotari library.
@@ -175,7 +170,7 @@ impl PaymentProcessorMode {
         Ok(resp.available_balance)
     }
 
-    async fn send_to_self_via_grpc(&self, output_count: u32, fee_per_gram: u64) -> Result<String> {
+    async fn send_to_self_via_grpc(&self, output_count: u32, fee_per_gram: u64) -> Result<u64> {
         let address = self.address.as_deref().ok_or_else(|| anyhow!("Wallet address not available"))?;
         let amount_per_output = 100_000u64;
 
@@ -201,48 +196,88 @@ impl PaymentProcessorMode {
         let resp = client.client_mut().transfer(request).await?;
         let inner = resp.into_inner();
         let tx_id = inner.results.first()
-            .map(|r| r.transaction_id.to_string())
-            .unwrap_or_else(|| "unknown".to_string());
+            .map(|r| r.transaction_id)
+            .ok_or_else(|| anyhow!("Transfer response contained no results"))?;
         Ok(tx_id)
     }
 
     #[allow(dead_code)]
-    async fn send_single_transfer_via_grpc(&self, destination: &str, amount: u64, fee_per_gram: u64) -> Result<String> {
+    async fn send_single_transfer_via_grpc(&self, destination: &str, amount: u64, fee_per_gram: u64) -> Result<u64> {
         let mut guard = self.grpc_client.lock().await;
         let client = guard.as_mut().ok_or_else(|| anyhow!("gRPC client not connected"))?;
         let resp = client.transfer(destination, amount, fee_per_gram).await?;
         let tx_id = resp.results.first()
-            .map(|r| r.transaction_id.to_string())
-            .unwrap_or_else(|| "unknown".to_string());
+            .map(|r| r.transaction_id)
+            .ok_or_else(|| anyhow!("Transfer response contained no results"))?;
         Ok(tx_id)
     }
 
-    async fn wait_for_confirmation_via_grpc(&self, c_min: u32, timeout_secs: u64) -> Result<()> {
+    /// Wait for a specific transaction to reach `c_min` confirmations.
+    ///
+    /// Polls the wallet gRPC `GetTransactionInfo` to check the specific tx status.
+    /// Once mined, verifies confirmation depth against base node tip height.
+    async fn wait_for_confirmation_via_grpc(&self, tx_id: u64, c_min: u32, timeout_secs: u64) -> Result<()> {
+        use minotari_app_grpc::tari_rpc::TransactionStatus;
+
         let start = std::time::Instant::now();
         let timeout = Duration::from_secs(timeout_secs);
-        let base_node_client = crate::http_rpc::BaseNodeRpcClient::new(&self.base_node_http);
-        let broadcast_tip = base_node_client.get_tip_height().await?;
 
         loop {
             if start.elapsed() > timeout {
-                anyhow::bail!("Timeout waiting for confirmation (c_min={})", c_min);
+                anyhow::bail!(
+                    "Timeout waiting for tx {} confirmation (c_min={})",
+                    tx_id, c_min
+                );
             }
 
-            let current_tip = base_node_client.get_tip_height().await?;
-            if current_tip >= broadcast_tip + c_min as u64 {
-                debug!(
-                    "Confirmation reached: broadcast_tip={}, current_tip={}, c_min={}",
-                    broadcast_tip, current_tip, c_min
-                );
-                return Ok(());
+            // Poll the specific transaction status via wallet gRPC
+            let tx_info = {
+                let mut guard = self.grpc_client.lock().await;
+                let client = guard.as_mut().ok_or_else(|| anyhow!("gRPC client not connected"))?;
+                client.get_transaction_info(tx_id).await?
+            };
+
+            match tx_info {
+                Some(info) => {
+                    match info.status {
+                        s if s == TransactionStatus::MinedConfirmed as i32 => {
+                            debug!("Transaction {} confirmed (MINED_CONFIRMED)", tx_id);
+                            return Ok(());
+                        }
+                        s if s == TransactionStatus::MinedUnconfirmed as i32 => {
+                            let mined_height = info.mined_in_block_height;
+                            let current_tip = crate::http_rpc::BaseNodeRpcClient::new(&self.base_node_http)
+                                .get_tip_height().await?;
+                            let confirmations = current_tip.saturating_sub(mined_height);
+                            if confirmations >= c_min as u64 {
+                                debug!(
+                                    "Transaction {} confirmed: {} confirmations at height {}",
+                                    tx_id, confirmations, mined_height
+                                );
+                                return Ok(());
+                            }
+                            debug!(
+                                "Tx {} mined at height {}, waiting for {} confirmations (current_tip={})",
+                                tx_id, mined_height, c_min, current_tip
+                            );
+                        }
+                        s if s == TransactionStatus::Rejected as i32 => {
+                            anyhow::bail!(
+                                "Transaction {} was rejected (status={})",
+                                tx_id, s
+                            );
+                        }
+                        _ => {
+                            debug!("Tx {} status={}, still waiting...", tx_id, info.status);
+                        }
+                    }
+                }
+                None => {
+                    debug!("Tx {} not yet found in wallet DB, waiting...", tx_id);
+                }
             }
-            debug!(
-                "Waiting for {} confirmations: broadcast_tip={}, c_min={}",
-                current_tip.saturating_sub(broadcast_tip),
-                broadcast_tip,
-                c_min
-            );
-            tokio::time::sleep(Duration::from_secs(10)).await;
+
+            tokio::time::sleep(Duration::from_secs(5)).await;
         }
     }
 
@@ -503,7 +538,7 @@ impl PaymentProcessorMode {
             {
                 Ok(tx_id) => {
                     info!("S1: Doubling round {} tx: {}", round + 1, tx_id);
-                    self.wait_for_confirmation_via_grpc(config.c_min, 300).await?;
+                    self.wait_for_confirmation_via_grpc(tx_id, config.c_min, 300).await?;
                     current_utxos *= 2;
                 }
                 Err(e) => {
@@ -528,7 +563,7 @@ impl PaymentProcessorMode {
                 match self.send_to_self_via_grpc(outputs, config.fee_rate).await {
                     Ok(tx_id) => {
                         info!("S1: Fan-out round {} tx: {}", round + 1, tx_id);
-                        self.wait_for_confirmation_via_grpc(config.c_min, 300).await?;
+                        self.wait_for_confirmation_via_grpc(tx_id, config.c_min, 300).await?;
                         current_utxos += outputs - 1;
                     }
                     Err(e) => {

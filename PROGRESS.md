@@ -28,7 +28,9 @@
 | Start wallet daemon | ✅ Running | PID 89627 on port 5100, network `esme` |
 | Create account | ✅ Done | "Benchmark Wallet" at `component_8929...ef3c` |
 | Claim faucet | ✅ Submitted | Tx `569d2a...d121c7` — **Pending** on Esmeralda |
-| Balance credited | ❌ Pending | Still 0 — awaiting ~3 min testnet block time |
+| Balance credited | ❌ Pending | Still 0 — awaiting Ootle indexer confirmation |
+| Claim #1 | ✅ Submitted | Tx `569d2a...d121c7` at 11:19 AM — "Result: In progress" |
+| Claim #2 | ✅ Submitted | Tx `2ce909...8374a6` at 11:26 AM — "Result: In progress" |
 | Run baseline profile | ❌ Next session | Needs confirmed balance first |
 
 ### ❌ What's Blocking Merge

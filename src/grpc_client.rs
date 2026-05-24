@@ -115,6 +115,32 @@ impl OldWalletGrpcClient {
         Ok(response.into_inner())
     }
 
+    /// Get transaction info by transaction ID.
+    /// Returns Ok(Some(tx_info)) if found, Ok(None) if not found (waiting for broadcast).
+    #[allow(dead_code)]
+    pub async fn get_transaction_info(&mut self, tx_id: u64) -> Result<Option<minotari_app_grpc::tari_rpc::TransactionInfo>> {
+        use minotari_app_grpc::tari_rpc::GetTransactionInfoRequest;
+        
+        debug!("Calling GetTransactionInfo for tx_id={}", tx_id);
+        
+        let request = tonic::Request::new(GetTransactionInfoRequest {
+            transaction_ids: vec![tx_id],
+        });
+        
+        let response = self
+            .client_mut()
+            .get_transaction_info(request)
+            .await
+            .context("GetTransactionInfo RPC failed")?;
+        
+        let mut txs = response.into_inner().transactions;
+        if txs.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(txs.remove(0)))
+        }
+    }
+
     /// Get chain tip height from wallet via GetState
     #[allow(dead_code)]
     pub async fn get_tip_height(&mut self) -> Result<u64> {
