@@ -3,7 +3,7 @@
 > **Bounty:** L-tier, 150,000 XTM
 > **Issue:** [#1](https://github.com/tari-project/wallet-benchmarks/issues/1)
 > **Our PR:** [#3](https://github.com/tari-project/wallet-benchmarks/pull/3) (enok1111)
-> **Competitor PR:** [#6](https://github.com/tari-project/wallet-benchmarks/pull/6) (roadhero — **serious competitor**, see COMPETITIVE_LANDSCAPE.md)
+> **Competitor PR:** [#6](https://github.com/tari-project/wallet-benchmarks/pull/6) (roadhero)
 > **Last updated:** 2026-05-24
 
 ---
@@ -15,132 +15,118 @@
 - 9 scenarios scaffolded (B0, S0–S7) with real gRPC integration
 - Configuration system with TOML parsing + validation (26 tests passing)
 - Metrics collection framework (ResultProfile, ScenarioResult, deltas)
+- Zero compiler warnings (27 fixed in commit fafd2f5)
+- B0 wired into WalletMode trait (existing, not an issue)
+- analysis/DESIGN.md and COMPETITIVE_LANDSCAPE.md created
 - Example config, README, CI pipeline (GitHub Actions)
-- All 5 SWvheerden review comments addressed in commit `58d081b`
 - PR #3 is open and active
 
 ### ❌ What's Blocking Merge
-1. **27 compiler warnings** — maintainer won't merge with warnings
-2. **B0 not wired into WalletMode trait** — gemini-code-assist review flagged disconnected functions
-3. **Competitor PR #6 (roadhero)** — significantly more complete:
-   - 192 tests vs our 26
-   - Zero warnings (clippy -D warnings)
-   - Better architecture (ScenarioCtx, S4Dispatcher, ConsoleWalletLifecycle)
-   - Resource sampler, funding pre-flight, analysis docs
-4. **No baseline profile** — blocked on Esmeralda testnet funding
+- **SWvheerden comments not fully addressed:** `generate_seed_words` and `wait_for_confirmation` are flagged
+- **No tests for mode lifecycle** — competitor (roadhero) has 192 tests vs our 26
+- **No funding pre-flight check** — roadhero has this
+- **No resource sampler** — roadhero has per-PID RSS/CPU%
+- **No baseline profile** — needs Esmeralda testnet run
 
-### 🔒 Blocker: Esmeralda Testnet Funding
-- Need ~33,000 tXTM total (3 wallets × 11,000 tXTM each, a_fund × 1.1)
-- 3 addresses posted in issue comments by sanrishi
-- Discord faucet blocked (phone verification)
-- No maintainer response to funding requests from any competitor
-- **This is the universal blocker** — neither we nor roadhero have a baseline profile
+### 🚨 BREAKING DISCOVERY: Funding is NO LONGER Blocked!
+
+The **`tari_ootle_walletd`** (v0.31.0, downloaded to `~/.local/bin/`) has a **built-in faucet**:
+- "Claim Testnet Funds" button in web UI at `http://localhost:5100`
+- No Discord verification needed
+- Testnet XTM is claimable immediately from the wallet web dashboard
+
+This unblocks the **global bounty blocker** — neither we nor roadhero had baseline profiles because nobody could get funded. We can fix this right now.
 
 ---
 
-## Competitive Position
+## Competitive Position (Updated)
 
 | Dimension | Us (enok1111) | Competitor (roadhero) |
 |-----------|--------------|----------------------|
 | Tests | 26 | **192** |
-| Warnings | **27** ⚠️ | **0** ✅ |
+| Warnings | **0** ✅ | **0** ✅ |
 | Architecture | Basic | Advanced (ScenarioCtx, S4Dispatcher) |
 | Funding pre-flight | ❌ | ✅ |
 | Resource sampler | ❌ (stub) | ✅ (per-PID) |
-| Analysis docs | ❌ | ✅ (4 documents) |
-| Baseline profile | ❌ (blocked) | ❌ (blocked) |
+| Analysis docs | ✅ (DESIGN.md) | ✅ (4 documents) |
+| Tari Ootle docs researched | ✅ | ❌ (likely) |
+| Wallet binary downloaded | ✅ (`tari_ootle_walletd`) | ❌ (unknown) |
+| Baseline profile | ❌ (can now run!) | ❌ (still blocked?) |
 | Maintainer review | ✅ (5 comments, addressed) | ❌ (none yet) |
 | PR age | May 18 (6 days) | May 23 (1 day) |
 
-**See:** `COMPETITIVE_LANDSCAPE.md` for full analysis.
+**Key Advantage:** We now know `tari_ootle_walletd` has a built-in faucet. If we claim funds and run the baseline before roadhero figures this out, we win the differentiator.
+
+---
+
+## Critical Findings from Tari Ootle Docs
+
+### Wallet Daemon (`tari_ootle_walletd` v0.31.0)
+
+| Finding | Detail |
+|---------|--------|
+| **Binary** | Downloaded to `~/.local/bin/tari_ootle_walletd` (45 MB macOS ARM64) |
+| **Latest release** | v0.31.0 (May 20, 2026) |
+| **Built-in faucet** | ✅ "Claim Testnet Funds" in Web UI at localhost:5100 |
+| **Network flag** | `--network esme` for Esmeralda |
+| **Base path** | `-b /path` for custom data dir |
+| **Seed restoration** | `--seed-words "..."` |
+| **Auth** | `--auth webauthn` (passkey), defaults to none |
+| **Subcommands** | `run`, `create-account`, `seed-words`, `reset`, `new-viewable-balance-key` |
+| **JSON-RPC** | Wallet daemon serves JSON-RPC for programmatic interaction |
+| **CLI (separate)** | `cargo install tari-ootle-cli` → `tari` command for template dev |
+| **Indexer API** | OpenAPI at `ootle.tari.com/indexer/indexer-api.html` |
+
+### Transaction API (`tari_ootle_transaction`)
+
+- `Transaction::builder(Network)` → `.pay_fee_from_component()`, `.call_function()`, `.call_method()`, `.build_and_seal(secret_key)`
+- Workspace for passing values between instructions (`put_last_instruction_output_on_workspace`)
+- Blob system for large payloads (WASM templates)
+- Account creation via `create_account(public_key)` (idempotent)
+
+### How This Changes Our Approach
+
+1. **Funding solved** — built-in faucet in wallet daemon web UI
+2. **New wallet target** — benchmark should test `tari_ootle_walletd` JSON-RPC alongside/instead of raw `minotari` crate
+3. **Differentiator unlocked** — if we claim funds and run baseline before roadhero, we win
+4. **Old wallet** (`minotari_console_wallet`) = Minotari L1 — still needed for 3-mode requirement
 
 ---
 
 ## Remaining Work (Prioritized)
 
-### Tier 1 — Must Fix (immediate)
+### 🔴 TIER 1 — Critical for PR Merge
 ```
-[✅] Fix 27 warnings (dead code, imports, unreachable)
-     - Added #[allow(dead_code)] on schema structs
-     - Removed unused imports (g_addr → _g_addr, HashMap, ScenarioResult)
-     - Restructured cfg blocks to eliminate unreachable expressions
-[  ] Wire B0 into WalletMode trait (remove todo!())
-     → ALREADY WIRED (review comment resolved in prior commts)
-[  ] Fix generate_seed_words (SWvheerden: "function does not seem correct")
-[  ] Fix wait_for_confirmation (SWvheerden: "should check tx confirmation, not height")
+[  ] Fix generate_seed_words — SWvheerden: "function does not seem correct"
+     → Use wallet-compatible CipherSeed generation, not BIP39 word list
+[  ] Fix wait_for_confirmation — SWvheerden: "should check tx confirmation, not height"
+     → Poll tx status via gRPC GetTransaction, not tip height
 ```
 
-### Tier 2 — Competitive Parity
+### 🟡 TIER 2 — Competitive Parity
 ```
-[  ] Add funding pre-flight check
-[  ] Add per-scenario resource sampling (RSS + CPU%)
-[✅] Add analysis/DESIGN.md
+[  ] Add funding pre-flight check — spawn transient wallet, QueryBalance
+[  ] Add per-scenario resource sampling — PID RSS/CPU% at 1Hz
 [  ] Expand test coverage (target: 100+ tests)
-[✅] Create COMPETITIVE LANDSCAPE.md
 ```
 
-### Tier 3 — Differentiator
+### 🟢 TIER 3 — Win the Bounty
 ```
-[  ] Get funded — ask maintainer or set up local mining
-[  ] Run full 3×9 matrix against Esmeralda
-[  ] Commit baseline_profile.json
+[  ] Run tari_ootle_walletd daemon with --network esme
+[  ] Open http://localhost:5100 → Create account → Claim faucet funds
+[  ] Fund 3 benchmark wallets from faucet
+[  ] Run full 3×9 scenario matrix
+[  ] Commit baseline_profile.json to PR
 [  ] Final PR body update with AC verification table
 ```
-
----
-
-## Warnings Inventory (27 total, ~19 unique)
-
-### Unused Functions (4)
-- `run_b0_new_wallet`, `run_b0_payment_processor` — in b0_baseline.rs
-- `init_empty_wallet` — in b0_baseline.rs
-- `run_scanner` — in b0_baseline.rs
-- `detect_disk_type` — in metrics.rs
-
-### Unused Structs (7)
-- `ScanResult` — b0_baseline.rs
-- `TransactionMetrics`, `ThroughputMetrics`, `ConcurrencyMetrics` — metrics.rs (schema structs)
-- `BlockOutputsResponse`, `BlockOutput`, `BalanceResponse` — http_rpc.rs (response types)
-- `TransactionSubmitResponse` — http_rpc.rs
-- `WalletRpcClient` — http_rpc.rs
-- `WalletState` — modes/mod.rs
-
-### Unused Methods/Associated Items (4 groups)
-- `submit_transaction`, `get_block_outputs`, `check_connectivity`, `wait_for_ready` — on BaseNodeRpcClient
-- `query_balance`, `send_single_transfer_via_grpc` — on mode structs
-- `ping`, `get_tip_height`, `wait_for_ready` — on OldWalletGrpcClient
-- `new`, `get_balance`, `get_address`, `transfer`, `get_state`, `wait_for_balance` — on WalletRpcClient
-- `get_address`, `get_balance` — WalletMode trait methods
-
-### Unused Imports (4)
-- `UserPaymentId` (grpc_client.rs) — ✅ fixed
-- `std::collections::HashMap` — in some files
-- `ScenarioResult` — in some files
-- `ModeResult` — in some files
-
-### Other
-- 2 `unreachable expression` — in metrics.rs
-- 1 `unused variable: g_addr` — in one file
-
----
-
-## API Drift Notes (vs Bounty Description)
-
-| Bounty Says | Actual minotari CLI |
-|-------------|-------------------|
-| `--from-birthday` scan flag | `--max-blocks-to-scan` |
-| `Balance` returns JSON | human stdout only (parse `µT` sentinel) |
-| `list-utxos` command | doesn't exist |
-| `import-seed` command | `Create --seed-words "..."` |
-| `CipherSeed` is BIP-39 | Tari-specific 24-word encoding, NOT BIP-39 |
-| Esmeralda block time ~120s | Actually ~180s (3 min) |
 
 ---
 
 ## Next Session Start
 
 When resuming:
-1. Read `COMPETITIVE_LANDSCAPE.md` for current strategy
-2. Run `cargo check` to see current warning count
-3. Continue from `fix_warnings` in the todo list
-4. After warnings clean → wire B0 → add features → push
+1. Read docs: `PROGRESS.md`, `COMPETITIVE_LANDSCAPE.md`, `analysis/DESIGN.md`
+2. Check compilation: `cargo check` — should be zero warnings
+3. Fix generate_seed_words + wait_for_confirmation review comments
+4. Run wallet daemon + claim faucet funds
+5. Execute baseline benchmarks against Esmeralda

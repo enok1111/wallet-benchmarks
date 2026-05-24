@@ -117,10 +117,14 @@
 
 ### Immediate (this session)
 ```
-[  ] Fix 27 warnings (clean all dead code, imports, unreachable)
-[  ] Wire B0 into OldWalletMode::run_scenario
-[  ] Create COMPETITIVE_LANDSCAPE.md (this file)
-[  ] Update PROGRESS.md with current state
+[✅] Fix 27 warnings (clean all dead code, imports, unreachable)
+[✅] Wire B0 into OldWalletMode::run_scenario (already done)
+[✅] Create COMPETITIVE_LANDSCAPE.md
+[✅] Update PROGRESS.md with current state
+[✅] Research Tari Ootle docs (ootle.tari.com)
+[✅] Download tari_ootle_walletd v0.31.0 to ~/.local/bin/
+[ ] Fix generate_seed_words per SWvheerden's feedback
+[ ] Fix wait_for_confirmation per SWvheerden's feedback
 ```
 
 ### Short-term (before next PR push)
