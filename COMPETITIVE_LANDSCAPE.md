@@ -9,8 +9,8 @@
 
 | Contributor | PR | Tests | Warnings | Submitted | Branch |
 |-------------|----|-------|----------|-----------|--------|
-| **enok1111** (us) | [#3](https://github.com/tari-project/wallet-benchmarks/pull/3) | **26** | **27** (⚠️) | May 18 | `bounty/issue-1-wallet-benchmark-harness` |
-| **roadhero** | [#6](https://github.com/tari-project/wallet-benchmarks/pull/6) | **192** | **0** (✅) | May 23 | `bounty/wallet-benchmarks-1-create-benchmarks` |
+| **enok1111** (us) | [#3](https://github.com/tari-project/wallet-benchmarks/pull/3) | **26** | **0** ✅ | May 18 | `bounty/issue-1-wallet-benchmark-harness` |
+| **roadhero** | [#6](https://github.com/tari-project/wallet-benchmarks/pull/6) | **192** | **0** ✅ | May 23 | `bounty/wallet-benchmarks-1-create-benchmarks` |
 | **sanrishi** | ? (comments in issue #1) | unknown | unknown | ~May 20 | unknown |
 
 ---
@@ -26,7 +26,7 @@
 | Metrics/calculations | included | extensive |
 | Mode lifecycle | none | extensive (init/run/teardown per mode) |
 | S4 dispatcher gating | none | static-grep test enforces no serialization |
-| Sentinel/regression | none | `builds_correct_argv_for_single_recipient` — locks CLI argv shape across 30+ commits |
+| Sentinel/regression | none | `builds_correct_argv_for_single_recipient` — locks CLI argv shape |
 | CLI subcommands | basic `run` | `run`, `gen-seed`, `print-address` + `--skip-funding-preflight` |
 
 **Gap:** roadhero has **7.4x more tests** (192 vs 26). We need 100+ more.
@@ -43,20 +43,17 @@
 | Redaction safety | none | schema-locked denylist panics at serialize |
 | Birthday management | init_wallet_db sets SQL | `CipherSeed` decode → `change_birthday` → `replace_mnemonic` |
 | Config merge | `#[serde(default)]` (clean) | similar approach |
-| Analysis directory | none | `analysis/DESIGN.md`, `ANALYSIS.md`, `API_DRIFT.md`, `RESULT_PROFILE_SCHEMA.md`, `PR_BODY_PLAN.md` |
+| Analysis directory | `analysis/DESIGN.md` | `analysis/DESIGN.md`, `ANALYSIS.md`, `API_DRIFT.md`, `RESULT_PROFILE_SCHEMA.md`, `PR_BODY_PLAN.md` |
 
-**Gap:** roadhero's architecture is objectively more complete and professionally structured. Their `ScenarioCtx`, `S4Dispatcher`, and subprocess lifecycle management are significant advantages.
+**Gap:** roadhero's architecture is objectively more complete. Their `ScenarioCtx`, `S4Dispatcher`, and subprocess lifecycle management are significant advantages.
 
 ### 🔧 Code Quality
 
 | Metric | enok1111 (us) | roadhero |
 |--------|--------------|----------|
-| Warnings | **27** | **0** (clippy `-D warnings`) |
+| Warnings | **0** ✅ (fixed in `fafd2f5`) | **0** (clippy `-D warnings`) |
 | Clippy | not checked | ✅ `-D warnings` |
-| Unused code | 19+ unique warnings | none |
-| Duplicated logic | `generate_seed_words` replicated per mode | centralized |
-
-**Gap:** Critical. 27 warnings is a disqualifier for maintainer review. Must fix immediately.
+| Unused code | `#[allow(dead_code)]` on future methods | none |
 
 ### 📋 Bounty Deliverables
 
@@ -69,12 +66,12 @@
 | Environment disclosure | ✅ | ✅ (full) |
 | Wallet version pinning | ✅ | ✅ |
 | Computed deltas | ✅ | ✅ |
-| Baseline profile committed | ❌ (blocked: funding) | ❌ (blocked: funding) |
+| Baseline profile committed | ❌ (faucet claim pending) | ❌ (unknown if funded) |
 | Run instructions | ✅ (README) | ✅ (++ operator notes) |
 | Third-party reproducible | ⚠️ partial | ⚠️ partial |
 | Harness doesn't hide pain | ⚠️ implied | ✅ explicit (pain points UX doc) |
 
-**Key:** Neither side has a baseline profile. That's our biggest opening.
+**Key:** Neither side has a baseline profile. We have a submitted faucet claim — if it confirms before roadhero figures out the built-in faucet, we win this differentiator.
 
 ### 👀 Maintainer Interaction
 
@@ -84,9 +81,27 @@
 | gemini-code-assist review | ✅ 5 comments (4 high/1 medium) | ❌ none |
 | Review response | ✅ enok1111 responded to all | N/A |
 | PR age | **May 18** (6 days ago) | May 23 (1 day ago) |
-| Last update | May 23 (commit `fc52c85`) | May 23 |
+| Last update | May 24 (commit `f96fd68`) | May 23 |
 
 **Advantage:** We have maintainer eyes on our PR and addressed all comments. SWvheerden has already seen our code. roadhero hasn't been reviewed yet.
+
+---
+
+## Funding Race — Current Status ⚠️
+
+This is our biggest competitive advantage right now. Let's track it.
+
+| Milestone | Us (enok1111) | roadhero |
+|-----------|--------------|----------|
+| Tari Ootle faucet discovered | ✅ | ❌ (unknown) |
+| `tari_ootle_walletd` downloaded | ✅ (v0.31.0) | ❌ (unknown) |
+| Wallet daemon running | ✅ (PID 89627, port 5100) | ❌ (unknown) |
+| Account created | ✅ ("Benchmark Wallet") | ❌ (unknown) |
+| Faucet claim submitted | ✅ (tx `569d2a...d121c7`) | ❌ (unknown) |
+| Balance confirmed | ❌ (Pending on Esmeralda) | ❌ (unknown) |
+| Baseline profile generated | ❌ | ❌ |
+
+**Assessment:** We have a 1-2 session lead on the funding front. Don't waste it.
 
 ---
 
@@ -94,57 +109,53 @@
 
 ### Tier 1 — Must Fix (immediate blockers)
 
-1. **Fix 27 warnings** — maintainer won't merge with warnings. Target: `cargo check` / `cargo clippy` clean.
-2. **Wire B0 into WalletMode trait** — gemini review flagged B0 functions are disconnected from trait. `run_b0_old_wallet` exists in `b0_baseline.rs` but `OldWalletMode::run_scenario` has `todo!()` for B0.
-3. **Fix `generate_seed_words`** — SWvheerden flagged as "function does not seem correct" in new_wallet.rs:231. Needs wallet-compatible seed generation (not just BIP39 word list concatenation).
-4. **Fix `wait_for_confirmation`** — SWvheerden flagged "should not work on height but tx confirmation itself". Need proper tx confirmation polling, not `broadcast_tip + c_min`.
+1. ~~Fix 27 warnings~~ **✅ DONE** — `cargo check` clean in commit `fafd2f5`
+2. ~~Wire B0 into WalletMode trait~~ **✅ DONE** — confirmed at `old_wallet.rs:274`
+3. **Fix `generate_seed_words`** — SWvheerden flagged as "function does not seem correct" in new_wallet.rs:231. Needs wallet-compatible CipherSeed generation.
+4. **Fix `wait_for_confirmation`** — SWvheerden flagged "should not work on height but tx confirmation itself". Need proper tx confirmation polling.
 
 ### Tier 2 — Competitive Parity (needed to win)
 
-5. Add **funding pre-flight check** — roadhero has this. Spawn transient wallets, query `GetBalance`, require `available_balance ≥ a_fund × 1.1`.
-6. Add **per-scenario resource sampling** — peak RSS + CPU% per PID. roadhero uses `/proc` (Linux) / `proc_pidinfo` (macOS) at 1Hz.
-7. Add **analysis docs** — at minimum `DESIGN.md` with architecture decisions, data flow, scenario protocol.
-8. **Dramatically expand tests** — add mode lifecycle tests, scenario dispatcher tests, S4 gating tests.
+5. Add **funding pre-flight check** — transient wallets, `GetBalance`, require `available_balance ≥ a_fund × 1.1`
+6. Add **per-scenario resource sampling** — PID RSS/CPU% at 1Hz via `proc_pidinfo` (macOS)
+7. **Expand tests to 100+** — mode lifecycle tests, scenario dispatcher tests, S4 gating tests
 
-### Tier 3 — Differentiators (our unique wins)
+### Tier 3 — Win the Baseline Race
 
-9. **Get funded and run the baseline** — this is the single biggest differentiator. Neither side has it. If we can get 33k tXTM funded and produce `baseline_profile.json`, we win.
-10. **Progressive enhancement** — fix all review comments, get CI green, then ask SWvheerden for funding help.
+8. **Wait for faucet confirmation** — check `http://localhost:5100` next session
+9. **Fund 2 more accounts** from faucet (need 3 wallets for 3 modes)
+10. **Run full 3×9 benchmark matrix**
+11. **Commit `baseline_profile.json`** to PR #3
 
 ---
 
 ## Concrete Action Plan
 
-### Immediate (this session)
+### Completed This Session
 ```
 [✅] Fix 27 warnings (clean all dead code, imports, unreachable)
-[✅] Wire B0 into OldWalletMode::run_scenario (already done)
-[✅] Create COMPETITIVE_LANDSCAPE.md
+[✅] Confirm B0 wired into WalletMode trait
+[✅] Create/update COMPETITIVE_LANDSCAPE.md
 [✅] Update PROGRESS.md with current state
-[✅] Research Tari Ootle docs (ootle.tari.com)
-[✅] Download tari_ootle_walletd v0.31.0 to ~/.local/bin/
-[ ] Fix generate_seed_words per SWvheerden's feedback
-[ ] Fix wait_for_confirmation per SWvheerden's feedback
+[✅] Research Tari Ootle docs
+[✅] Download tari_ootle_walletd v0.31.0
+[✅] Start wallet daemon on port 5100
+[✅] Create Benchmark Wallet account
+[✅] Submit faucet claim for testnet funds
+[✅] Add analysis/DESIGN.md
+[✅] Create analysis/ directory with DESIGN.md
 ```
 
-### Short-term (before next PR push)
+### Next Session
 ```
-[  ] Add funding pre-flight check
-[  ] Add per-scenario resource sampling
-[  ] Add analysis/DESIGN.md
-[  ] Add 50+ more tests
-[  ] Fix generate_seed_words per SWvheerden's feedback
-[  ] Fix wait_for_confirmation per SWvheerden's feedback
-[  ] Push all fixes to PR branch
-```
-
-### Funding & Baseline
-```
-[  ] Ask SWvheerden for 33k tXTM funding (3 addresses × 11k)
-[  ] OR set up local Esmeralda mining
-[  ] Run full 3×9 matrix
-[  ] Commit baseline_profile.json
-[  ] Final PR body update with AC verification
+[ ] Check if faucet balance confirmed at localhost:5100
+[ ] Fix generate_seed_words per SWvheerden feedback
+[ ] Fix wait_for_confirmation per SWvheerden feedback
+[ ] Add funding pre-flight check
+[ ] Add per-scenario resource sampling
+[ ] Fund remaining wallets
+[ ] Run benchmark baseline
+[ ] Push fixes + baseline to PR #3
 ```
 
 ---
@@ -154,8 +165,7 @@
 | Risk | Probability | Impact | Mitigation |
 |------|------------|--------|------------|
 | roadhero merges first | Medium | Loss of bounty | Move faster on fixes, excel on code quality |
-| SWvheerden ignores funding request | High | Can't produce baseline | Build local mining setup; prod gently |
-| roadhero produces baseline before us | Medium | Loss of key differentiator | Fund faster or run local mining |
-| Review comments not convincing | Low | PR rejected | Address every comment thoroughly |
+| Faucet fails to deliver funds | Low-Medium | Can't produce baseline | Retry claim, check explorer, use Discord fallback |
+| roadhero discovers faucet | Medium | Lose differentiator | We're 1-2 sessions ahead — maintain lead |
+| SWvheerden review comments not convincing | Low | PR rejected | Address every comment thoroughly |
 | Another competitor appears | Low | More competition | PR #3 has 6-day head start |
-| Warnings make PR look abandoned | High | Maintainer dismisses PR | Fix ALL warnings this session |
