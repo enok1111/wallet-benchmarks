@@ -10,7 +10,7 @@ use log::info;
 use std::collections::HashMap;
 
 use crate::config::HarnessConfig;
-use crate::metrics::{ModeResult, ScenarioResult};
+use crate::metrics::ModeResult;
 
 /// Run all scenarios for old wallet mode
 pub async fn run_old_wallet_mode(config: &HarnessConfig) -> Result<ModeResult> {

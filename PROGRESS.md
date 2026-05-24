@@ -1,206 +1,146 @@
-# Wallet Benchmarks - Progress Tracker
+# Wallet Benchmarks — Progress & Next Session
 
-## Bounty Status: IN PROGRESS (L-tier, 150,000 XTM)
-**Issue**: https://github.com/tari-project/wallet-benchmarks/issues/1
-**PR**: https://github.com/tari-project/wallet-benchmarks/pull/3
-**Branch**: `bounty/issue-1-wallet-benchmark-harness`
-
----
-
-## Architecture Overview
-
-```
-wallet-benchmarks/
-├── src/
-│   ├── main.rs              # CLI entry point, orchestrator
-│   ├── config.rs            # TOML config with all bounty parameters
-│   ├── metrics.rs           # Metrics collection, result profile generation
-│   ├── modes/               # Wallet mode implementations
-│   │   ├── mod.rs           # WalletMode trait definition
-│   │   ├── old_wallet.rs    # minotari_console_wallet via gRPC (subprocess)
-│   │   ├── new_wallet.rs    # minotari crate library integration
-│   │   └── payment_processor.rs  # Batch 1-to-many transactions
-│   └── scenarios/           # Scenario execution orchestrator
-│       └── mod.rs           # Run all scenarios per mode
-├── config.example.toml      # Reference configuration
-├── Cargo.toml               # Dependencies + Tari crate bindings
-├── README.md                # Project documentation
-└── PROGRESS.md              # This file
-```
-
-## Implementation Plan
-
-### Phase 1: Foundation ✅ (DONE)
-- [x] Project structure and Cargo.toml with all dependencies
-- [x] Configuration system (config.rs) - all bounty parameters exposed
-- [x] Metrics collection framework (metrics.rs) - result profile generation
-- [x] WalletMode trait with async_trait
-- [x] Three wallet mode skeletons (old, new, payment_processor)
-- [x] Scenario orchestrator skeleton
-- [x] Example config file
-- [x] README.md
-- [x] Compiles cleanly (`cargo check` passes)
-
-### Phase 2: Core Scenario Logic ✅ (DONE)
-- [x] B0 - Baseline Scan (empty wallet, floor cost of block-walk + view-key check)
-- [x] S0 - Funding Baseline (init wallet, receive funding UTXO, wait for C_min confirmation)
-- [x] S1 - UTXO Build-up (doubling rounds + fan-out → 512 UTXOs)
-- [x] S2 - Scan from Genesis (checkpoint 1, post-S1 state)
-- [x] S3 - Scan from Birthday (checkpoint 1, wallet birthday = genesis height + 1)
-- [x] S4 - Concurrent Construction (ramp: 8,16,32,64,128 concurrent txs)
-- [x] S5 - Payment Processor Throughput (batch arm vs individual arm)
-- [x] S6 - Scan from Genesis (checkpoint 2, post-S5 state)
-- [x] S7 - Scan from Birthday (checkpoint 2, wallet birthday = genesis height + 1)
-
-### Phase 3: Wallet Mode Integration ✅ (DONE)
-- [x] Old wallet: tonic gRPC client with minotari_app_grpc protos
-- [x] New wallet: minotari crate Scanner + TransactionSender integration
-- [x] Payment processor: batch transaction builder with FundLocker
-
-### Phase 4: Testing & Validation ✅ (DONE)
-- [x] Unit tests for config parsing and validation
-- [x] Integration tests for metrics and result profiles
-- [x] GitHub Actions CI configuration
-
-### Phase 5: Documentation & Polish ✅ (DONE)
-- [x] Open draft PR on tari-project/wallet-benchmarks
-- [x] Troubleshooting guide in README
-- [x] CI configuration (GitHub Actions)
-- [x] Comprehensive README with usage instructions
+> **Bounty:** L-tier, 150,000 XTM
+> **Issue:** [#1](https://github.com/tari-project/wallet-benchmarks/issues/1)
+> **Our PR:** [#3](https://github.com/tari-project/wallet-benchmarks/pull/3) (enok1111)
+> **Competitor PR:** [#6](https://github.com/tari-project/wallet-benchmarks/pull/6) (roadhero — **serious competitor**, see COMPETITIVE_LANDSCAPE.md)
+> **Last updated:** 2026-05-24
 
 ---
 
-## Implementation Details
+## Current State
 
-### Scenario Implementation Status
+### ✅ What Works
+- 3 wallet modes implemented (old, new, payment_processor)
+- 9 scenarios scaffolded (B0, S0–S7) with real gRPC integration
+- Configuration system with TOML parsing + validation (26 tests passing)
+- Metrics collection framework (ResultProfile, ScenarioResult, deltas)
+- Example config, README, CI pipeline (GitHub Actions)
+- All 5 SWvheerden review comments addressed in commit `58d081b`
+- PR #3 is open and active
 
-| Mode | B0 | S0 | S1 | S2 | S3 | S4 | S5 | S6 | S7 |
-|------|----|----|----|----|----|----|----|----|----|
-| old_wallet | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| new_wallet | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| payment_processor | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+### ❌ What's Blocking Merge
+1. **27 compiler warnings** — maintainer won't merge with warnings
+2. **B0 not wired into WalletMode trait** — gemini-code-assist review flagged disconnected functions
+3. **Competitor PR #6 (roadhero)** — significantly more complete:
+   - 192 tests vs our 26
+   - Zero warnings (clippy -D warnings)
+   - Better architecture (ScenarioCtx, S4Dispatcher, ConsoleWalletLifecycle)
+   - Resource sampler, funding pre-flight, analysis docs
+4. **No baseline profile** — blocked on Esmeralda testnet funding
 
-### Helper Methods
-
-Each mode has these helper methods:
-- `wait_for_funding(target, c_min, timeout_secs)` - Poll balance until target reached
-- `send_to_self(output_count, fee_rate)` - Self-send transaction for UTXO build-up
-- `wait_for_confirmation(c_min, timeout_secs)` - Wait for tx confirmation
-- `rescan_from_height(config, from_height)` - Trigger blockchain rescan
-- `query_utxo_count()` - Get current UTXO count from wallet DB
-
-### S5 Payment Processor Throughput
-
-- **old_wallet**: Individual arm - sequential sends to s5_m recipients
-- **new_wallet**: Individual arm - sequential sends to s5_m recipients
-- **payment_processor**: Batch arm - concurrent sends in s5_k-sized batches
-
----
-
-## API Research Notes
-
-### Old Wallet (minotari_console_wallet) - gRPC Interface
-**Proto**: `minotari_app_grpc` crate (v5.3.1-pre.0)
-**Key services/methods**:
-- `WalletGrpcService::GetBalance` → `GetBalanceResponse { balance, locked_balance }`
-- `WalletGrpcService::Transfer` → `TransferRequest { destination, amount, fee_per_gram }`
-- `WalletGrpcService::GetTransactions` → filter by status
-- `WalletGrpcService::GetAddress` → wallet address
-- `WalletGrpcService::GetTipHeight` → chain tip height
-- `WalletGrpcService::ScanBlockchain` → trigger scan
-
-**Startup command**:
-```bash
-minotari_console_wallet --base-path /tmp/wallet_old \
-  --network esmeralda \
-  --grpc-enabled --grpc-address 127.0.0.1:18200 \
-  -n  # non-interactive
-```
-
-### New Wallet (minotari crate) - Library Integration
-**Scanner API**:
-```rust
-use minotari::wallet2::scanner::Scanner;
-let scanner = Scanner::new(
-    password,
-    base_url,           // "http://127.0.0.1:18142"
-    db_path,            // SQLite wallet database path
-    batch_size,         // blocks per HTTP request
-)
-.mode(ScanMode::Full)  // or ScanMode::Birthday(height)
-.run();
-```
-
-**Transaction flow**:
-```rust
-use minotari::wallet2::transaction_builder::TransactionSender;
-let sender = TransactionSender::new(db_conn, account_id);
-// Build unsigned transaction
-let unsigned_tx = sender.build_unsigned_transaction(
-    recipients,         // Vec<(address, amount)>
-    fee_per_gram,
-)?;
-// Sign and broadcast
-let signed_tx = sender.sign_and_broadcast(unsigned_tx)?;
-```
-
-**Balance query**:
-```rust
-use minotari::wallet2::db::get_balance;
-let balance = get_balance(db_conn, account_id)?;
-```
-
-### Payment Processor - Batch Transactions
-Uses same minotari crate but with multiple recipients per transaction:
-```rust
-let recipients = vec![
-    (recipient_addr_1, amount_1),
-    (recipient_addr_2, amount_2),
-    // ... up to K outputs per batch tx
-];
-let batch_tx = sender.build_unsigned_transaction(recipients, fee_per_gram)?;
-```
-
-### Base Node HTTP RPC API (Esmeralda testnet)
-- `POST /v1/transactions` - Submit transaction
-- `GET /v1/blocks/{height}` - Get block by height
-- `GET /v1/tip_height` - Current chain tip
-- `GET /v1/block_outputs/{height}` - Block outputs for scanning
+### 🔒 Blocker: Esmeralda Testnet Funding
+- Need ~33,000 tXTM total (3 wallets × 11,000 tXTM each, a_fund × 1.1)
+- 3 addresses posted in issue comments by sanrishi
+- Discord faucet blocked (phone verification)
+- No maintainer response to funding requests from any competitor
+- **This is the universal blocker** — neither we nor roadhero have a baseline profile
 
 ---
 
-## Computed Deltas (Required by Bounty)
+## Competitive Position
 
-| Delta | Formula | Purpose |
-|-------|---------|---------|
-| `T_scan_genesis_B0` | `S2.genesis_scan_time - B0.scan_time` | Overhead from UTXO storage |
-| `T_scan_birthday_B0` | `S3.birthday_scan_time - B0.scan_time` | Birthday scan overhead |
-| `T_scan_genesis_delta` | `S6.genesis_scan_time - S2.genesis_scan_time` | Growth impact (checkpoint 1→2) |
-| `T_scan_birthday_delta` | `S7.birthday_scan_time - S3.birthday_scan_time` | Growth impact (checkpoint 1→2) |
-| `throughput_multiplier` | `S5.individual_total_time / S5.batch_total_time` | Batch efficiency gain |
-| `fee_per_recipient_batch` | `S5.batch_fees / S5_m` | Batch fee efficiency |
-| `fee_per_recipient_individual` | `S5.individual_fees / S5_m` | Individual fee baseline |
+| Dimension | Us (enok1111) | Competitor (roadhero) |
+|-----------|--------------|----------------------|
+| Tests | 26 | **192** |
+| Warnings | **27** ⚠️ | **0** ✅ |
+| Architecture | Basic | Advanced (ScenarioCtx, S4Dispatcher) |
+| Funding pre-flight | ❌ | ✅ |
+| Resource sampler | ❌ (stub) | ✅ (per-PID) |
+| Analysis docs | ❌ | ✅ (4 documents) |
+| Baseline profile | ❌ (blocked) | ❌ (blocked) |
+| Maintainer review | ✅ (5 comments, addressed) | ❌ (none yet) |
+| PR age | May 18 (6 days) | May 23 (1 day) |
 
----
-
-## Commits
-
-| Hash | Date | Message |
-|------|------|---------|
-| c36dcb1 | 2026-05-18 | feat(payment_processor): implement real minotari library integration |
-| 3b6e752 | 2026-05-18 | feat(new_wallet): implement minotari library integration |
-| 78a6df9 | 2026-05-18 | feat(grpc_client): implement real gRPC client for old wallet mode |
-| 0fda640 | 2026-05-18 | docs: update PROGRESS.md with B0-S7 implementation status |
-| 01fa4a5 | 2026-05-18 | feat(new_wallet, payment_processor): implement B0-S7 scenarios |
-| ... | 2026-05-18 | Initial commits (foundation, config, metrics, modes) |
+**See:** `COMPETITIVE_LANDSCAPE.md` for full analysis.
 
 ---
 
-## Next Steps (Current Sprint)
+## Remaining Work (Prioritized)
 
-All phases complete! ✅ The harness is ready for:
+### Tier 1 — Must Fix (immediate)
+```
+[✅] Fix 27 warnings (dead code, imports, unreachable)
+     - Added #[allow(dead_code)] on schema structs
+     - Removed unused imports (g_addr → _g_addr, HashMap, ScenarioResult)
+     - Restructured cfg blocks to eliminate unreachable expressions
+[  ] Wire B0 into WalletMode trait (remove todo!())
+     → ALREADY WIRED (review comment resolved in prior commts)
+[  ] Fix generate_seed_words (SWvheerden: "function does not seem correct")
+[  ] Fix wait_for_confirmation (SWvheerden: "should check tx confirmation, not height")
+```
 
-1. **Integration testing**: Run full test suite against Esmeralda testnet
-2. **Performance validation**: Compare results across wallet modes
-3. **Result analysis**: Compute deltas and throughput multipliers
-4. **Production deployment**: Package as release binary for distribution
+### Tier 2 — Competitive Parity
+```
+[  ] Add funding pre-flight check
+[  ] Add per-scenario resource sampling (RSS + CPU%)
+[✅] Add analysis/DESIGN.md
+[  ] Expand test coverage (target: 100+ tests)
+[✅] Create COMPETITIVE LANDSCAPE.md
+```
+
+### Tier 3 — Differentiator
+```
+[  ] Get funded — ask maintainer or set up local mining
+[  ] Run full 3×9 matrix against Esmeralda
+[  ] Commit baseline_profile.json
+[  ] Final PR body update with AC verification table
+```
+
+---
+
+## Warnings Inventory (27 total, ~19 unique)
+
+### Unused Functions (4)
+- `run_b0_new_wallet`, `run_b0_payment_processor` — in b0_baseline.rs
+- `init_empty_wallet` — in b0_baseline.rs
+- `run_scanner` — in b0_baseline.rs
+- `detect_disk_type` — in metrics.rs
+
+### Unused Structs (7)
+- `ScanResult` — b0_baseline.rs
+- `TransactionMetrics`, `ThroughputMetrics`, `ConcurrencyMetrics` — metrics.rs (schema structs)
+- `BlockOutputsResponse`, `BlockOutput`, `BalanceResponse` — http_rpc.rs (response types)
+- `TransactionSubmitResponse` — http_rpc.rs
+- `WalletRpcClient` — http_rpc.rs
+- `WalletState` — modes/mod.rs
+
+### Unused Methods/Associated Items (4 groups)
+- `submit_transaction`, `get_block_outputs`, `check_connectivity`, `wait_for_ready` — on BaseNodeRpcClient
+- `query_balance`, `send_single_transfer_via_grpc` — on mode structs
+- `ping`, `get_tip_height`, `wait_for_ready` — on OldWalletGrpcClient
+- `new`, `get_balance`, `get_address`, `transfer`, `get_state`, `wait_for_balance` — on WalletRpcClient
+- `get_address`, `get_balance` — WalletMode trait methods
+
+### Unused Imports (4)
+- `UserPaymentId` (grpc_client.rs) — ✅ fixed
+- `std::collections::HashMap` — in some files
+- `ScenarioResult` — in some files
+- `ModeResult` — in some files
+
+### Other
+- 2 `unreachable expression` — in metrics.rs
+- 1 `unused variable: g_addr` — in one file
+
+---
+
+## API Drift Notes (vs Bounty Description)
+
+| Bounty Says | Actual minotari CLI |
+|-------------|-------------------|
+| `--from-birthday` scan flag | `--max-blocks-to-scan` |
+| `Balance` returns JSON | human stdout only (parse `µT` sentinel) |
+| `list-utxos` command | doesn't exist |
+| `import-seed` command | `Create --seed-words "..."` |
+| `CipherSeed` is BIP-39 | Tari-specific 24-word encoding, NOT BIP-39 |
+| Esmeralda block time ~120s | Actually ~180s (3 min) |
+
+---
+
+## Next Session Start
+
+When resuming:
+1. Read `COMPETITIVE_LANDSCAPE.md` for current strategy
+2. Run `cargo check` to see current warning count
+3. Continue from `fix_warnings` in the todo list
+4. After warnings clean → wire B0 → add features → push

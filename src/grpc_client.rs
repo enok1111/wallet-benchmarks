@@ -10,7 +10,7 @@ use minotari_app_grpc::tari_rpc::{
     GetBalanceRequest, GetBalanceResponse,
     GetAddressResponse,
     PaymentRecipient, TransferRequest, TransferResponse,
-    Empty, UserPaymentId,
+    Empty,
 };
 use std::time::Duration;
 
@@ -38,6 +38,7 @@ impl OldWalletGrpcClient {
     }
 
     /// Check if the gRPC connection is alive
+    #[allow(dead_code)]
     pub async fn ping(&mut self) -> Result<()> {
         debug!("Pinging wallet gRPC server");
         let _ = self.get_address().await?;
@@ -45,6 +46,7 @@ impl OldWalletGrpcClient {
     }
 
     /// Get wallet address
+    #[allow(dead_code)]
     pub async fn get_address(&mut self) -> Result<GetAddressResponse> {
         debug!("Calling GetAddress");
         
@@ -60,6 +62,7 @@ impl OldWalletGrpcClient {
     }
 
     /// Get wallet balance
+    #[allow(dead_code)]
     pub async fn get_balance(&mut self) -> Result<GetBalanceResponse> {
         debug!("Calling GetBalance");
         
@@ -77,6 +80,7 @@ impl OldWalletGrpcClient {
     }
 
     /// Transfer funds to a recipient
+    #[allow(dead_code)]
     pub async fn transfer(
         &mut self,
         destination: &str,
@@ -112,6 +116,7 @@ impl OldWalletGrpcClient {
     }
 
     /// Get chain tip height from wallet via GetState
+    #[allow(dead_code)]
     pub async fn get_tip_height(&mut self) -> Result<u64> {
         debug!("Getting tip height via GetState");
 
@@ -127,6 +132,7 @@ impl OldWalletGrpcClient {
     }
 
     /// Wait for the gRPC server to be ready by attempting a connection
+    #[allow(dead_code)]
     pub async fn wait_for_ready(address: &str, timeout_secs: u64) -> Result<Option<Self>> {
         let start = std::time::Instant::now();
         let timeout = Duration::from_secs(timeout_secs);

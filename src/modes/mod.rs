@@ -11,10 +11,9 @@ pub mod payment_processor;
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 use crate::config::HarnessConfig;
-use crate::metrics::{ModeResult, ScenarioResult};
+use crate::metrics::ScenarioResult;
 
 /// Wallet mode trait - all modes implement this interface
 #[async_trait::async_trait]
@@ -30,9 +29,11 @@ pub trait WalletMode {
     ) -> Result<ScenarioResult>;
 
     /// Get the wallet address for this mode
+    #[allow(dead_code)]
     fn get_address(&self) -> Option<&str>;
 
     /// Get the current balance in µT
+    #[allow(dead_code)]
     async fn get_balance(&self) -> Result<u64>;
 
     /// Tear down the wallet mode (cleanup processes, temp dirs)
@@ -58,6 +59,7 @@ impl WalletModeId {
 }
 
 /// Shared state for wallet mode execution
+#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WalletState {
     /// Wallet address

@@ -129,6 +129,7 @@ impl PaymentProcessorMode {
     }
 
     /// Get wallet balance from database
+    #[allow(dead_code)]
     async fn query_balance(&self) -> Result<u64> {
         use minotari::get_balance;
 
@@ -205,6 +206,7 @@ impl PaymentProcessorMode {
         Ok(tx_id)
     }
 
+    #[allow(dead_code)]
     async fn send_single_transfer_via_grpc(&self, destination: &str, amount: u64, fee_per_gram: u64) -> Result<String> {
         let mut guard = self.grpc_client.lock().await;
         let client = guard.as_mut().ok_or_else(|| anyhow!("gRPC client not connected"))?;

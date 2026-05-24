@@ -17,6 +17,7 @@ pub struct BaseNodeRpcClient {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct BalanceResponse {
     pub available_balance: u64,
     pub pending_incoming_balance: u64,
@@ -33,6 +34,7 @@ pub struct TipHeightResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct TransactionSubmitResponse {
     #[serde(default)]
     pub is_success: bool,
@@ -75,6 +77,7 @@ impl BaseNodeRpcClient {
     }
 
     /// Submit a transaction to the base node
+    #[allow(dead_code)]
     pub async fn submit_transaction(&self, tx_bytes: &[u8]) -> Result<String> {
         let url = format!("{}/v1/transactions", self.base_url);
         debug!("POST {} ({} bytes)", url, tx_bytes.len());
@@ -98,6 +101,7 @@ impl BaseNodeRpcClient {
     }
 
     /// Get block outputs at a specific height (for scanning)
+    #[allow(dead_code)]
     pub async fn get_block_outputs(&self, height: u64) -> Result<Vec<BlockOutput>> {
         let url = format!("{}/v1/block_outputs/{}", self.base_url, height);
         debug!("GET {}", url);
@@ -116,6 +120,7 @@ impl BaseNodeRpcClient {
     }
 
     /// Check if the base node is reachable
+    #[allow(dead_code)]
     pub async fn check_connectivity(&self) -> Result<bool> {
         let url = format!("{}/v1/version", self.base_url);
         debug!("GET {} (connectivity check)", url);
@@ -127,6 +132,7 @@ impl BaseNodeRpcClient {
     }
 
     /// Wait for the base node to be ready
+    #[allow(dead_code)]
     pub async fn wait_for_ready(&self, timeout_secs: u64) -> Result<()> {
         let start = std::time::Instant::now();
         let timeout = Duration::from_secs(timeout_secs);
@@ -147,11 +153,13 @@ impl BaseNodeRpcClient {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct BlockOutputsResponse {
     pub outputs: Vec<BlockOutput>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct BlockOutput {
     #[serde(default)]
     pub commit: String,
@@ -164,6 +172,7 @@ pub struct BlockOutput {
 }
 
 /// Old wallet HTTP RPC client (for wallets that expose HTTP endpoints)
+#[allow(dead_code)]
 pub struct WalletRpcClient {
     /// Wallet HTTP endpoint
     base_url: String,
@@ -173,6 +182,7 @@ pub struct WalletRpcClient {
 
 impl WalletRpcClient {
     /// Create a new wallet RPC client
+    #[allow(dead_code)]
     pub fn new(base_url: &str) -> Self {
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(120))
@@ -186,6 +196,7 @@ impl WalletRpcClient {
     }
 
     /// Get wallet balance
+    #[allow(dead_code)]
     pub async fn get_balance(&self) -> Result<BalanceResponse> {
         let url = format!("{}/v1/balance", self.base_url);
         debug!("GET {}", url);
@@ -204,6 +215,7 @@ impl WalletRpcClient {
     }
 
     /// Get wallet address
+    #[allow(dead_code)]
     pub async fn get_address(&self) -> Result<String> {
         let url = format!("{}/v1/address", self.base_url);
         debug!("GET {}", url);
@@ -230,6 +242,7 @@ impl WalletRpcClient {
     }
 
     /// Transfer funds to a recipient
+    #[allow(dead_code)]
     pub async fn transfer(
         &self,
         destination: &str,
@@ -267,6 +280,7 @@ impl WalletRpcClient {
     }
 
     /// Get wallet state (scanned height, balances, etc.)
+    #[allow(dead_code)]
     pub async fn get_state(&self) -> Result<serde_json::Value> {
         let url = format!("{}/v1/state", self.base_url);
         debug!("GET {}", url);
@@ -285,6 +299,7 @@ impl WalletRpcClient {
     }
 
     /// Wait for balance to reach minimum threshold
+    #[allow(dead_code)]
     pub async fn wait_for_balance(&self, min_balance: u64, timeout_secs: u64) -> Result<()> {
         let start = std::time::Instant::now();
         let timeout = Duration::from_secs(timeout_secs);

@@ -638,7 +638,7 @@ impl OldWalletMode {
             let mut handles = Vec::new();
             for i in 0..n_concurrent_val {
                 let addr = recipient_addr.clone();
-                let g_addr = grpc_addr.clone();
+                let _g_addr = grpc_addr.clone();
                 let c_arc = Arc::clone(&client_arc);
                 let handle = tokio::spawn(async move {
                     let start_tx = std::time::Instant::now();

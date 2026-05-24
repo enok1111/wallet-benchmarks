@@ -97,6 +97,7 @@ pub async fn run_b0_old_wallet(config: &HarnessConfig) -> Result<ScenarioResult>
 }
 
 /// Run B0 baseline scan for new wallet mode (library integration)
+#[allow(dead_code)]
 pub async fn run_b0_new_wallet(config: &HarnessConfig) -> Result<ScenarioResult> {
     info!("Running B0 baseline scan for new wallet mode");
 
@@ -180,6 +181,7 @@ pub async fn run_b0_new_wallet(config: &HarnessConfig) -> Result<ScenarioResult>
 }
 
 /// Run B0 baseline scan for payment processor mode (same as new wallet)
+#[allow(dead_code)]
 pub async fn run_b0_payment_processor(config: &HarnessConfig) -> Result<ScenarioResult> {
     // Payment processor uses the same scanning mechanism as new wallet
     run_b0_new_wallet(config).await
@@ -308,6 +310,7 @@ fn kill_process(process: &mut std::process::Child) {
 
 // Helper functions for new wallet library integration
 
+#[allow(dead_code)]
 async fn init_empty_wallet(_db_path: &std::path::Path, _password: &str) -> Result<()> {
     // TODO: Initialize empty wallet database using minotari crate
     // This would use minotari::utils::init_wallet::init_with_view_key
@@ -315,10 +318,12 @@ async fn init_empty_wallet(_db_path: &std::path::Path, _password: &str) -> Resul
     Ok(())
 }
 
+#[allow(dead_code)]
 struct ScanResult {
     outputs_found: u32,
 }
 
+#[allow(dead_code)]
 async fn run_scanner(
     _db_path: &std::path::Path,
     _base_url: &str,

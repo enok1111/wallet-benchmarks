@@ -70,6 +70,7 @@ impl EnvironmentInfo {
 }
 
 /// Detect disk type using heuristics
+#[allow(dead_code)]
 fn detect_disk_type() -> Option<String> {
     #[cfg(target_os = "linux")]
     {
@@ -86,15 +87,19 @@ fn detect_disk_type() -> Option<String> {
                 return Some("hdd".to_string());
             }
         }
+        None
     }
 
     #[cfg(target_os = "macos")]
     {
         // macOS typically uses SSDs; check SMART data if available
-        return Some("ssd".to_string());
+        Some("ssd".to_string())
     }
 
-    None
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        None
+    }
 }
 
 /// Get OS version string
@@ -108,15 +113,18 @@ fn get_os_version() -> Option<String> {
                 }
             }
         }
+        None
     }
 
     #[cfg(target_os = "macos")]
     {
-        // Could parse sw_vers output; simplified for now
-        return Some("macOS".to_string());
+        Some("macOS".to_string())
     }
 
-    None
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        None
+    }
 }
 
 /// Comprehensive result profile containing all benchmark data
@@ -281,6 +289,7 @@ impl ScenarioResult {
 }
 
 /// Per-transaction metrics for detailed analysis
+#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TransactionMetrics {
     /// Transaction ID or index
@@ -319,6 +328,7 @@ pub struct ScanMetrics {
 }
 
 /// Concurrent construction metrics for S4 scenario
+#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConcurrencyMetrics {
     /// Number of concurrent transactions attempted
@@ -336,6 +346,7 @@ pub struct ConcurrencyMetrics {
 }
 
 /// Payment processor throughput metrics for S5 scenario
+#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ThroughputMetrics {
     /// Batch arm total time in seconds
