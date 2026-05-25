@@ -49,8 +49,7 @@ pub async fn run_new_wallet_mode(config: &HarnessConfig) -> Result<ModeResult> {
     use crate::modes::WalletMode;
 
     let temp_dir = tempfile::TempDir::new()?;
-    let grpc_port = config.old_wallet_grpc_base_port + 1;
-    let mut mode = NewWalletMode::new(temp_dir.path().to_path_buf(), grpc_port);
+    let mut mode = NewWalletMode::new(temp_dir.path().to_path_buf(), 0);
 
     // Initialize wallet
     mode.initialize(config).await?;

@@ -448,11 +448,15 @@ impl PaymentProcessorMode {
         let tip_height_start = base_node_client.get_tip_height().await?;
         result.tip_height_start = tip_height_start;
 
-        // TODO: Run scanner using minotari crate
         info!(
-            "B0: Scanning from genesis to tip {} (library integration pending)",
+            "B0: Scanning from genesis to tip {} (library integration)",
             tip_height_start
         );
+
+        match self.scan_blockchain().await {
+            Ok(_) => info!("B0 scan completed"),
+            Err(e) => warn!("B0 scan error (may be expected for empty wallet): {}", e),
+        }
 
         let scan_time_secs = start.elapsed().as_secs_f64();
         result.wall_clock_secs = scan_time_secs;

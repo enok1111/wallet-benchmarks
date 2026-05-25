@@ -191,13 +191,16 @@ impl OldWalletMode {
         }
     }
 
+    /// Estimate UTXO count from the gRPC wallet's balance.
+    /// Divides available balance by the standard output amount as a rough proxy.
     async fn get_utxo_count_via_grpc(&self) -> Result<u32> {
-        let mut guard = self.grpc_client.lock().await;
-        let client = guard.as_mut().ok_or_else(|| anyhow!("gRPC client not connected"))?;
-        let _state = client.client_mut().get_state(tonic::Request::new(
-            minotari_app_grpc::tari_rpc::GetStateRequest {},
-        )).await?;
-        Ok(1)
+        let balance = self.get_balance_via_grpc().await?;
+        let estimated_utxos = if balance > 0 {
+            std::cmp::max(1, balance / 100_000) as u32
+        } else {
+            0
+        };
+        Ok(estimated_utxos)
     }
 
     async fn get_tip_height_from_base_node_internal(&self) -> Result<u64> {
