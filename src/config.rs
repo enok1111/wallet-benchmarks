@@ -95,6 +95,12 @@ pub struct HarnessConfig {
     #[serde(default)]
     pub wallet_password: Option<String>,
 
+    /// Shared seed words for ALL wallet modes (12-word mnemonic).
+    /// When set, all modes use the same wallet identity for fair comparison.
+    /// Falls back to per-mode fields if those are set.
+    #[serde(default)]
+    pub shared_seed_words: Option<Vec<String>>,
+
     /// Seed words for old wallet mode (12-word mnemonic)
     #[serde(default)]
     pub seed_words_old: Option<Vec<String>>,
@@ -154,6 +160,7 @@ impl Default for HarnessConfig {
             scenarios: default_scenarios(),
             modes: default_modes(),
             wallet_password: None,
+            shared_seed_words: None,
             seed_words_old: None,
             seed_words_new: None,
             seed_words_payment: None,
@@ -327,5 +334,19 @@ impl HarnessConfig {
         }
 
         Ok(())
+    }
+
+    /// Resolve effective seed words for a given mode.
+    /// Priority: shared_seed_words > per-mode field > None (caller generates)
+    pub fn resolve_seed_words(&self, mode_name: &str) -> Option<Vec<String>> {
+        if let Some(ref shared) = self.shared_seed_words {
+            return Some(shared.clone());
+        }
+        match mode_name {
+            "old" => self.seed_words_old.clone(),
+            "new" => self.seed_words_new.clone(),
+            "payment_processor" => self.seed_words_payment.clone(),
+            _ => None,
+        }
     }
 }

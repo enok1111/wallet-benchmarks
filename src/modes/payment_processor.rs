@@ -352,8 +352,7 @@ impl WalletMode for PaymentProcessorMode {
 
         if self.seed_words.is_empty() {
             self.seed_words = config
-                .seed_words_payment
-                .clone()
+                .resolve_seed_words("payment_processor")
                 .unwrap_or_else(|| Self::generate_seed_words(WalletModeId::PaymentProcessor));
         }
 

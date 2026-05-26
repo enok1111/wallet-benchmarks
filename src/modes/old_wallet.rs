@@ -260,8 +260,7 @@ impl WalletMode for OldWalletMode {
 
         if self.seed_words.is_empty() {
             self.seed_words = config
-                .seed_words_old
-                .clone()
+                .resolve_seed_words("old")
                 .unwrap_or_else(|| Self::generate_seed_words(WalletModeId::Old));
         }
 
