@@ -48,6 +48,7 @@ pub struct NewWalletMode {
     password: String,
     base_node_http: String,
     account_id: u32,
+    birthday_height: u64,
 }
 
 impl NewWalletMode {
@@ -61,6 +62,7 @@ impl NewWalletMode {
             password: "benchmark_password_32chars_min".to_string(),
             base_node_http: "http://127.0.0.1:18143".to_string(),
             account_id: 1,
+            birthday_height: 0,
         }
     }
 
@@ -94,6 +96,19 @@ impl NewWalletMode {
             Some("default"),
         )
         .context("Failed to initialize wallet with seed words")?;
+
+        // Persist birthday height to DB so the Scanner starts from the correct height
+        {
+            let db = minotari::db::init_db(self.db_path.clone())
+                .context("Failed to init DB for birthday update")?;
+            let conn = db.get().context("Failed to get DB connection")?;
+            let birthday_val: i64 = birthday_height as i64;
+            let _ = conn.execute(
+                "UPDATE accounts SET birthday = ?1 WHERE birthday != ?1",
+                [birthday_val],
+            );
+            info!("Set account birthday to {}", birthday_height);
+        }
 
         // Get the wallet address after initialization
         let db = minotari::db::init_db(self.db_path.clone())
@@ -559,6 +574,12 @@ impl NewWalletMode {
             Ok(balance) => {
                 result.success_count = 1;
                 result.balance_delta_ut = balance as i64;
+                // Capture birthday height from current tip for S3/S7 rescans
+                let base_node = crate::http_rpc::BaseNodeRpcClient::new(&self.base_node_http);
+                if let Ok(tip) = base_node.get_tip_height().await {
+                    self.birthday_height = tip;
+                    info!("S0: Captured birthday height {}", tip);
+                }
             }
             Err(e) => {
                 result.failure_count = 1;
@@ -600,7 +621,7 @@ impl NewWalletMode {
                 current_utxos, config.volume_target, remaining, config.fanout_outputs_per_tx
             );
 
-            let fanout_rounds = (remaining + config.fanout_outputs_per_tx - 1) / config.fanout_outputs_per_tx;
+            let fanout_rounds = remaining.div_ceil(config.fanout_outputs_per_tx);
 
             for round in 0..fanout_rounds {
                 let outputs_this_round = std::cmp::min(
@@ -685,10 +706,11 @@ impl NewWalletMode {
         let tip_height_start = base_node_client.get_tip_height().await?;
         result.tip_height_start = tip_height_start;
 
-        // Wipe and reinitialize with birthday height (use current tip as birthday proxy)
+        // Wipe and reinitialize with birthday height from S0
         std::fs::remove_dir_all(&self.data_dir).ok();
         std::fs::create_dir_all(&self.data_dir)?;
-        self.init_wallet_db(tip_height_start).await?;
+        let birthday = if self.birthday_height > 0 { self.birthday_height } else { tip_height_start };
+        self.init_wallet_db(birthday).await?;
 
         match self.scan_blockchain().await {
             Ok(events) => info!("S3 scan completed: {} events", events.len()),
@@ -862,7 +884,8 @@ impl NewWalletMode {
 
         std::fs::remove_dir_all(&self.data_dir).ok();
         std::fs::create_dir_all(&self.data_dir)?;
-        self.init_wallet_db(tip_height_start).await?;
+        let birthday = if self.birthday_height > 0 { self.birthday_height } else { tip_height_start };
+        self.init_wallet_db(birthday).await?;
 
         match self.scan_blockchain().await {
             Ok(events) => info!("S7 scan completed: {} events", events.len()),

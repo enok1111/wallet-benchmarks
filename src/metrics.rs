@@ -192,26 +192,26 @@ impl ResultProfile {
                 );
             }
 
-            if let (Some(s6), Some(b0)) = (scenarios.get("S6"), scenarios.get("B0")) {
-                if b0.wall_clock_secs > 0.0 {
+            if let (Some(s6), Some(b0)) = (scenarios.get("S6"), scenarios.get("B0"))
+                && b0.wall_clock_secs > 0.0 {
                     deltas.insert(
                         format!("{}.scan_slowdown_s6_over_b0", mode_name),
                         serde_json::json!(s6.wall_clock_secs / b0.wall_clock_secs),
                     );
                 }
-            }
         }
 
-        if let (Some(pp_s5), Some(old_s5)) = (
+        // Primary: payment processor batch vs new wallet individual
+        if let (Some(pp_s5), Some(new_s5)) = (
             self.mode_results.get("payment_processor"),
-            self.mode_results.get("old"),
-        ) {
-            if let (Some(pp_result), Some(old_result)) = (
+            self.mode_results.get("new"),
+        )
+            && let (Some(pp_result), Some(new_result)) = (
                 pp_s5.scenarios.get("S5"),
-                old_s5.scenarios.get("S5"),
+                new_s5.scenarios.get("S5"),
             ) {
                 let t_batch = pp_result.wall_clock_secs;
-                let t_individual = old_result.wall_clock_secs;
+                let t_individual = new_result.wall_clock_secs;
                 if t_batch > 0.0 {
                     deltas.insert(
                         "s5_throughput_multiplier".into(),
@@ -219,7 +219,25 @@ impl ResultProfile {
                     );
                 }
             }
-        }
+
+        // Secondary: old wallet individual for context
+        if let (Some(pp_s5), Some(old_s5)) = (
+            self.mode_results.get("payment_processor"),
+            self.mode_results.get("old"),
+        )
+            && let (Some(pp_result), Some(old_result)) = (
+                pp_s5.scenarios.get("S5"),
+                old_s5.scenarios.get("S5"),
+            ) {
+                let t_batch = pp_result.wall_clock_secs;
+                let t_individual = old_result.wall_clock_secs;
+                if t_batch > 0.0 {
+                    deltas.insert(
+                        "s5_throughput_multiplier_old".into(),
+                        serde_json::json!(t_individual / t_batch),
+                    );
+                }
+            }
 
         self.computed_deltas = deltas;
     }

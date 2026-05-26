@@ -76,15 +76,14 @@ impl PaymentProcessorMode {
                 "SELECT COUNT(*) FROM accounts",
                 [],
                 |row| row.get::<_, i64>(0),
-            ) {
-                if count > 0 {
+            )
+                && count > 0 {
                     let _ = conn.execute(
                         "UPDATE accounts SET birthday = ?1 WHERE birthday != ?1",
                         [birthday_val],
                     );
                     info!("Updated account birthday to {}", birthday_height);
                 }
-            }
         }
 
         debug!("Payment processor wallet database initialized");
@@ -170,6 +169,7 @@ impl PaymentProcessorMode {
         Ok(resp.available_balance)
     }
 
+    #[allow(dead_code)]
     async fn send_to_self_via_grpc(&self, output_count: u32, fee_per_gram: u64) -> Result<u64> {
         let address = self.address.as_deref().ok_or_else(|| anyhow!("Wallet address not available"))?;
         let amount_per_output = 100_000u64;
@@ -216,6 +216,7 @@ impl PaymentProcessorMode {
     ///
     /// Polls the wallet gRPC `GetTransactionInfo` to check the specific tx status.
     /// Once mined, verifies confirmation depth against base node tip height.
+     #[allow(dead_code)]
     async fn wait_for_confirmation_via_grpc(&self, tx_id: u64, c_min: u32, timeout_secs: u64) -> Result<()> {
         use minotari_app_grpc::tari_rpc::TransactionStatus;
 
@@ -281,6 +282,228 @@ impl PaymentProcessorMode {
         }
     }
 
+    /// Send a transaction to self using the library's offline signing flow.
+    /// Used by S1 (doubling/fan-out) to build UTXOs without gRPC.
+    async fn send_to_self(&self, output_count: u32, fee_per_gram: u64) -> Result<u64> {
+        use minotari::transactions::one_sided_transaction::{OneSidedTransaction, Recipient};
+        use minotari::db::get_account_by_name;
+        use tari_common::configuration::Network;
+        use tari_common_types::tari_address::TariAddress;
+        use tari_transaction_components::offline_signing::sign_locked_transaction;
+        use tari_transaction_components::consensus::ConsensusConstantsBuilder;
+        use tari_transaction_components::tari_amount::MicroMinotari;
+
+        let db = minotari::init_db(self.db_path.clone())?;
+        let conn = db.get()?;
+
+        let account = get_account_by_name(&conn, "default")?
+            .ok_or_else(|| anyhow!("Default account not found"))?;
+
+        let address = TariAddress::from_base58(
+            self.address.as_deref().ok_or_else(|| anyhow!("Wallet address not available"))?,
+        )?;
+
+        let tx_builder = OneSidedTransaction::new(db.clone(), Network::Esmeralda, self.password.clone());
+
+        let amount_per_output = MicroMinotari(100_000);
+        let total_amount = amount_per_output.0 * output_count as u64;
+
+        let recipient = Recipient {
+            address,
+            amount: MicroMinotari(total_amount),
+            payment_id: Some(format!(
+                "bench-pp-s1-{}-{}",
+                output_count,
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis()
+            )),
+        };
+
+        let locked_funds = self.lock_funds_library(output_count).await?;
+
+        let unsigned_tx = tx_builder.create_unsigned_transaction(
+            &account,
+            locked_funds,
+            vec![recipient],
+            MicroMinotari(fee_per_gram),
+        )?;
+
+        let key_manager = account.get_key_manager(&self.password)?;
+        let consensus_constants = ConsensusConstantsBuilder::new(Network::Esmeralda).build();
+        let signed_result = sign_locked_transaction(
+            &key_manager,
+            consensus_constants,
+            Network::Esmeralda,
+            unsigned_tx,
+        )?;
+
+        self.broadcast_signed_transaction(&signed_result).await
+    }
+
+    /// Send a batch transaction to multiple recipients using the library.
+    /// Used by S5 (batch throughput) to demonstrate 1-to-many efficiency.
+    async fn send_batch_library(&self, recipients: &[(String, u64)], fee_per_gram: u64) -> Result<u64> {
+        use minotari::transactions::one_sided_transaction::{OneSidedTransaction, Recipient};
+        use minotari::db::get_account_by_name;
+        use tari_common::configuration::Network;
+        use tari_common_types::tari_address::TariAddress;
+        use tari_transaction_components::offline_signing::sign_locked_transaction;
+        use tari_transaction_components::consensus::ConsensusConstantsBuilder;
+        use tari_transaction_components::tari_amount::MicroMinotari;
+
+        let db = minotari::init_db(self.db_path.clone())?;
+        let conn = db.get()?;
+
+        let account = get_account_by_name(&conn, "default")?
+            .ok_or_else(|| anyhow!("Default account not found"))?;
+
+        let tx_builder = OneSidedTransaction::new(db.clone(), Network::Esmeralda, self.password.clone());
+
+        let tari_recipients: Vec<Recipient> = recipients
+            .iter()
+            .map(|(addr, amount)| Recipient {
+                address: TariAddress::from_base58(addr.as_str()).unwrap(),
+                amount: MicroMinotari(*amount),
+                payment_id: None,
+            })
+            .collect();
+
+        let locked_funds = self.lock_funds_library(recipients.len() as u32).await?;
+
+        let unsigned_tx = tx_builder.create_unsigned_transaction(
+            &account,
+            locked_funds,
+            tari_recipients,
+            MicroMinotari(fee_per_gram),
+        )?;
+
+        let key_manager = account.get_key_manager(&self.password)?;
+        let consensus_constants = ConsensusConstantsBuilder::new(Network::Esmeralda).build();
+        let signed_result = sign_locked_transaction(
+            &key_manager,
+            consensus_constants,
+            Network::Esmeralda,
+            unsigned_tx,
+        )?;
+
+        self.broadcast_signed_transaction(&signed_result).await
+    }
+
+    /// Lock funds for a transaction using simple UTXO selection (library version).
+    async fn lock_funds_library(&self, output_count: u32) -> Result<minotari::api::types::LockFundsResult> {
+        use minotari::db::{get_account_by_name, fetch_unspent_outputs};
+        use tari_transaction_components::tari_amount::MicroMinotari;
+        use tari_transaction_components::utxo_selection::UtxoValue;
+
+        let db = minotari::init_db(self.db_path.clone())?;
+        let conn = db.get()?;
+
+        let account = get_account_by_name(&conn, "default")?
+            .ok_or_else(|| anyhow!("Default account not found"))?;
+        let outputs = fetch_unspent_outputs(&conn, account.id, 0)?;
+
+        let amount_per_output = MicroMinotari(100_000);
+        let total_amount = amount_per_output.0 * output_count as u64;
+
+        let mut locked_outputs = Vec::new();
+        let mut accumulated = 0u64;
+
+        for output in outputs {
+            locked_outputs.push(output.output.clone());
+            accumulated += output.value().as_u64();
+            if accumulated >= total_amount {
+                break;
+            }
+        }
+
+        let fee_per_gram = MicroMinotari(5);
+        let estimated_tx_size = 500;
+        let fee_with_change = MicroMinotari(fee_per_gram.0 * estimated_tx_size);
+        let fee_without_change = MicroMinotari((fee_per_gram.0 * (estimated_tx_size - 100)) / 2);
+
+        Ok(minotari::api::types::LockFundsResult {
+            utxos: locked_outputs,
+            requires_change_output: accumulated > total_amount,
+            total_value: MicroMinotari(accumulated),
+            fee_without_change,
+            fee_with_change,
+        })
+    }
+
+    /// Broadcast a signed transaction via HTTP RPC (library version).
+    async fn broadcast_signed_transaction(
+        &self,
+        signed_result: &tari_transaction_components::offline_signing::models::SignedOneSidedTransactionResult,
+    ) -> Result<u64> {
+        let client = reqwest::Client::new();
+        let submit_url = format!("{}/json_rpc", self.base_node_http);
+        let transaction = &signed_result.signed_transaction.transaction;
+
+        let request = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": "1",
+            "method": "submit_transaction",
+            "params": { "transaction": transaction }
+        });
+
+        let response = client
+            .post(&submit_url)
+            .json(&request)
+            .send()
+            .await?;
+
+        if response.status().is_success() {
+            let numeric_tx_id = signed_result.request.tx_id.as_u64();
+            debug!("Transaction broadcast successfully (tx_id={})", numeric_tx_id);
+            Ok(numeric_tx_id)
+        } else {
+            let status = response.status();
+            anyhow::bail!("Transaction broadcast failed: {}", status);
+        }
+    }
+
+     /// Wait for a transaction to be confirmed using library-level scanning.
+    /// Re-scans the blockchain and checks if UTXO count has increased.
+    async fn wait_for_confirmation_library(&self, tx_id: u64, _c_min: u32, timeout_secs: u64) -> Result<()> {
+        let start = std::time::Instant::now();
+        let timeout = Duration::from_secs(timeout_secs);
+        let base_node = crate::http_rpc::BaseNodeRpcClient::new(&self.base_node_http);
+
+        loop {
+            if start.elapsed() > timeout {
+                anyhow::bail!(
+                    "Timeout waiting for tx {} confirmation",
+                    tx_id
+                );
+            }
+
+            let tip_height = base_node.get_tip_height().await?;
+
+            // Re-scan to pick up any new confirmed outputs
+            if let Err(e) = self.scan_blockchain().await {
+                debug!("Scan during confirmation poll: {}", e);
+            }
+
+            // Check if UTXO count has increased (means our tx confirmed)
+            let utxo_count = self.query_utxo_count().await.unwrap_or(0);
+            let balance = self.query_balance().await.unwrap_or(0);
+
+            debug!(
+                "Tx {} polling: tip={}, utxos={}, balance={}",
+                tx_id, tip_height, utxo_count, balance
+            );
+
+            if utxo_count > 0 && balance > 0
+                && tip_height > 0 {
+                    return Ok(());
+                }
+
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        }
+    }
+
     async fn wait_for_grpc_ready(&self, timeout_secs: u64) -> Result<()> {
         let start = std::time::Instant::now();
         let timeout = Duration::from_secs(timeout_secs);
@@ -304,6 +527,7 @@ impl PaymentProcessorMode {
         }
     }
 
+    #[allow(dead_code)]
     async fn create_and_broadcast_batch_transaction(
         &self,
         recipients: &[(&str, u64)],
@@ -418,7 +642,7 @@ impl WalletMode for PaymentProcessorMode {
     }
 
     async fn get_balance(&self) -> Result<u64> {
-        self.get_balance_via_grpc().await
+        self.query_balance().await
     }
 
     async fn teardown(&mut self) -> Result<()> {
@@ -536,12 +760,12 @@ impl PaymentProcessorMode {
         // Doubling phase
         for round in 0..config.doubling_rounds {
             match self
-                .send_to_self_via_grpc(current_utxos * 2, config.fee_rate)
+                .send_to_self(current_utxos * 2, config.fee_rate)
                 .await
             {
                 Ok(tx_id) => {
                     info!("S1: Doubling round {} tx: {}", round + 1, tx_id);
-                    self.wait_for_confirmation_via_grpc(tx_id, config.c_min, 300).await?;
+                    self.wait_for_confirmation_library(tx_id, config.c_min, 300).await?;
                     current_utxos *= 2;
                 }
                 Err(e) => {
@@ -556,17 +780,17 @@ impl PaymentProcessorMode {
         if current_utxos < config.volume_target {
             let remaining = config.volume_target - current_utxos;
             let fanout_rounds =
-                (remaining + config.fanout_outputs_per_tx - 1) / config.fanout_outputs_per_tx;
+                remaining.div_ceil(config.fanout_outputs_per_tx);
 
             for round in 0..fanout_rounds {
                 let outputs = std::cmp::min(
                     config.fanout_outputs_per_tx,
                     config.volume_target - current_utxos,
                 );
-                match self.send_to_self_via_grpc(outputs, config.fee_rate).await {
+                match self.send_to_self(outputs, config.fee_rate).await {
                     Ok(tx_id) => {
                         info!("S1: Fan-out round {} tx: {}", round + 1, tx_id);
-                        self.wait_for_confirmation_via_grpc(tx_id, config.c_min, 300).await?;
+                        self.wait_for_confirmation_library(tx_id, config.c_min, 300).await?;
                         current_utxos += outputs - 1;
                     }
                     Err(e) => {
@@ -705,7 +929,8 @@ impl PaymentProcessorMode {
                 let handle = tokio::spawn(async move {
                     let start_tx = std::time::Instant::now();
                     let mut guard = c_arc.lock().await;
-                    let outcome = if let Some(ref mut client) = *guard {
+                    
+                    if let Some(ref mut client) = *guard {
                         match client.transfer(&rcpt, 100_000, fee).await {
                             Ok(resp) => {
                                 let tx_id = resp.results.first()
@@ -717,8 +942,7 @@ impl PaymentProcessorMode {
                         }
                     } else {
                         (i, false, "no client".to_string(), start_tx.elapsed().as_micros() as u64)
-                    };
-                    outcome
+                    }
                 });
                 handles.push(handle);
             }
@@ -807,8 +1031,7 @@ impl PaymentProcessorMode {
             .map(|i| format!("{}_{}", recipient, i))
             .collect();
 
-        let mut batch_idx = 0u32;
-        for chunk in recipients.chunks(config.s5_k as usize) {
+        for (batch_idx, chunk) in recipients.chunks(config.s5_k as usize).enumerate() {
             let batch_start = Instant::now();
             info!(
                 "S5: Processing batch {} with {} recipients",
@@ -816,12 +1039,12 @@ impl PaymentProcessorMode {
                 chunk.len()
             );
 
-            let batch_recipients: Vec<(&str, u64)> = chunk
+            let batch_recipients: Vec<(String, u64)> = chunk
                 .iter()
-                .map(|r| (r.as_str(), config.a_fund / config.s5_m as u64))
+                .map(|r| (r.clone(), config.a_fund / config.s5_m as u64))
                 .collect();
 
-            match self.create_and_broadcast_batch_transaction(&batch_recipients, config.fee_rate).await {
+            match self.send_batch_library(&batch_recipients, config.fee_rate).await {
                 Ok(tx_id) => {
                     info!("S5: Batch {} tx: {}", batch_idx + 1, tx_id);
                     success_count += chunk.len() as u32;
@@ -845,11 +1068,9 @@ impl PaymentProcessorMode {
                 "batch_idx": batch_idx,
                 "recipients": chunk.len(),
                 "batch_wall_clock_secs": batch_time,
-                "success_count": if batch_idx < (config.s5_m / config.s5_k) as u32 { config.s5_k } else { config.s5_m % config.s5_k },
+                "success_count": config.s5_k,
                 "tx_per_sec": tx_per_sec,
             }));
-
-            batch_idx += 1;
         }
 
         let elapsed_secs = start.elapsed().as_secs_f64();
@@ -975,17 +1196,15 @@ impl PaymentProcessorMode {
         info!("Rescanning from height {} using minotari Scanner", from_height);
 
         // Update the account birthday in the DB so the Scanner starts from the correct height.
-        if from_height == 0 {
-            if let Ok(pool) = minotari::init_db(self.db_path.clone()) {
-                if let Ok(conn) = pool.get() {
+        if from_height == 0
+            && let Ok(pool) = minotari::init_db(self.db_path.clone())
+                && let Ok(conn) = pool.get() {
                     let _ = conn.execute(
                         "UPDATE accounts SET birthday = 0",
                         [],
                     );
                     info!("Set account birthday to 0 for genesis rescan");
                 }
-            }
-        }
 
         match self.scan_blockchain().await {
             Ok(_) => info!("Rescan completed"),

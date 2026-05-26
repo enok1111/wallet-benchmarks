@@ -240,11 +240,10 @@ impl OldWalletMode {
 
         self.wait_for_grpc_ready(120).await?;
 
-        if let Some(ref mut client) = *self.grpc_client.lock().await {
-            if let Ok(response) = client.get_address().await {
+        if let Some(ref mut client) = *self.grpc_client.lock().await
+            && let Ok(response) = client.get_address().await {
                 self.address = Some(hex::encode(&response.interactive_address));
             }
-        }
 
         info!("Wallet restarted and ready for rescan (from_height={})", from_height);
         Ok(())
@@ -464,7 +463,7 @@ impl OldWalletMode {
             );
 
             let fanout_rounds =
-                (remaining + config.fanout_outputs_per_tx - 1) / config.fanout_outputs_per_tx;
+                remaining.div_ceil(config.fanout_outputs_per_tx);
 
             for round in 0..fanout_rounds {
                 let outputs_this_round = std::cmp::min(
@@ -680,7 +679,8 @@ impl OldWalletMode {
                 let handle = tokio::spawn(async move {
                     let start_tx = std::time::Instant::now();
                     let mut guard = c_arc.lock().await;
-                    let outcome = if let Some(ref mut client) = *guard {
+                    
+                    if let Some(ref mut client) = *guard {
                         match client.transfer(&addr, 100_000, fee_rate).await {
                             Ok(resp) => {
                                 let tx_id = resp.results.first()
@@ -692,8 +692,7 @@ impl OldWalletMode {
                         }
                     } else {
                         (i, false, "no client".to_string(), start_tx.elapsed().as_micros() as u64)
-                    };
-                    outcome
+                    }
                 });
                 handles.push(handle);
             }

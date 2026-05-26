@@ -114,7 +114,7 @@ fn test_scenario_result_new() {
     assert_eq!(result.scenario_id, "B0");
     assert_eq!(result.success_count, 0);
     assert_eq!(result.failure_count, 0);
-    assert!((result.wall_clock_secs - 0.0) < f64::EPSILON);
+    assert!((result.wall_clock_secs - 0.0).abs() < f64::EPSILON);
     assert!(result.metrics.is_empty());
     assert!(result.failure_reasons.is_empty());
 }
