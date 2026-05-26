@@ -1,26 +1,19 @@
-# Build artifacts
-/target
-/Cargo.lock
-
-# IDE
-.idea/
-.vscode/
-*.swp
-*.swo
-
-# OS files
-.DS_Store
-Thumbs.db
-
-# Config (secrets)
-config.toml
-
-# Results (generated)
-results/*.json
-!results/.gitkeep
-
-# Logs
+target/
+**/*.db
 *.log
-logs/
-.playwright-mcp/
+.env
+.vscode/
+.idea/
+Cargo.lock
 
+# Private internal docs (not part of the harness deliverable)
+COMPETITIVE_LANDSCAPE.md
+HARDENING_PLAN.md
+NEXT_SESSION.md
+PROGRESS.md
+analysis/DESIGN.md
+docs/funding-setup-report.md
+SITUATION_ANALYSIS.md
+
+# Internal planning docs (not committed)
+.hermes/
