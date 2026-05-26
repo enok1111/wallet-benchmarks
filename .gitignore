@@ -18,9 +18,6 @@ SITUATION_ANALYSIS.md
 # Internal planning docs (not committed)
 .hermes/
 
-# Draft/alternate implementations
-src/modes/new_wallet_v2.rs
-
 # Local config files with paths
 config.toml
 config/

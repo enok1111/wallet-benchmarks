@@ -19,6 +19,27 @@ use crate::config::HarnessConfig;
 use crate::metrics::ScenarioResult;
 use crate::modes::{WalletMode, WalletModeId};
 
+/// Cloneable wallet handle for concurrent task spawning.
+/// Holds the fields needed for send_to_self and related operations.
+#[derive(Clone)]
+struct WalletHandle {
+    db_path: PathBuf,
+    address: Option<String>,
+    password: String,
+    base_node_http: String,
+}
+
+impl WalletHandle {
+    fn from_wallet(wallet: &NewWalletMode) -> Self {
+        Self {
+            db_path: wallet.db_path.clone(),
+            address: wallet.address.clone(),
+            password: wallet.password.clone(),
+            base_node_http: wallet.base_node_http.clone(),
+        }
+    }
+}
+
 pub struct NewWalletMode {
     data_dir: PathBuf,
     db_path: PathBuf,
@@ -700,28 +721,33 @@ impl NewWalletMode {
         let mut total_successes = 0u32;
         let mut total_failures = 0u32;
 
+        // Clone wallet handle for concurrent tasks -- each task gets its own
+        // copy of the wallet state. SQLite handles its own locking internally.
+        let handle = WalletHandle::from_wallet(self);
+
         for &n_concurrent in &config.concurrent_batches {
             info!("S4: Running {} concurrent transactions", n_concurrent);
 
-            // Fire all concurrent txs in parallel using tokio::join!
             let mut handles = Vec::new();
             for i in 0..n_concurrent {
-                let _fee_rate = config.fee_rate;
+                let h = handle.clone();
+                let fee_rate = config.fee_rate;
                 let handle = tokio::spawn(async move {
-                    // Each task creates a transaction independently
-                    // (will compete for UTXO selection - that's the point)
-                    let amount: u64 = 100_000;
-                    (i, Ok::<u64, anyhow::Error>(amount))
+                    let tx_result = send_concurrent_tx(&h, fee_rate).await;
+                    (i, tx_result)
                 });
                 handles.push(handle);
             }
 
             let batch_start = Instant::now();
             let batch_results: Vec<_> = futures::future::join_all(handles).await;
-            
+
             for r in batch_results {
                 match r {
-                    Ok((_, Ok(_))) => total_successes += 1,
+                    Ok((_, Ok(tx_id))) => {
+                        total_successes += 1;
+                        debug!("S4 tx succeeded: tx_id={}", tx_id);
+                    }
                     Ok((_, Err(e))) => {
                         total_failures += 1;
                         result.failure_reasons.push(format!("S4 concurrent tx failed: {}", e));
@@ -858,5 +884,148 @@ impl NewWalletMode {
         result.metrics.extend(s7_metrics);
 
         Ok(())
+    }
+}
+
+/// Send a concurrent transaction using a cloneable wallet handle.
+/// This is the standalone version of send_to_self that works with tokio::spawn.
+async fn send_concurrent_tx(handle: &WalletHandle, fee_per_gram: u64) -> Result<u64> {
+    use minotari::transactions::one_sided_transaction::{OneSidedTransaction, Recipient};
+    use minotari::db::get_account_by_name;
+    use tari_common::configuration::Network;
+    use tari_common_types::tari_address::TariAddress;
+    use tari_transaction_components::offline_signing::sign_locked_transaction;
+    use tari_transaction_components::consensus::ConsensusConstantsBuilder;
+    use tari_transaction_components::tari_amount::MicroMinotari;
+
+    let db = minotari::init_db(handle.db_path.clone())?;
+    let conn = db.get()?;
+
+    let account = get_account_by_name(&conn, "default")?
+        .ok_or_else(|| anyhow!("Default account not found"))?;
+
+    let address = TariAddress::from_base58(
+        handle
+            .address
+            .as_deref()
+            .ok_or_else(|| anyhow!("Wallet address not available"))?,
+    )?;
+
+    let tx_builder =
+        OneSidedTransaction::new(db.clone(), Network::Esmeralda, handle.password.clone());
+
+    let amount_per_output = MicroMinotari(100_000);
+    let total_amount = amount_per_output.0;
+
+    let recipient = Recipient {
+        address: address.clone(),
+        amount: MicroMinotari(total_amount),
+        payment_id: Some(format!(
+            "bench-s4-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis()
+        )),
+    };
+
+    // Lock funds
+    let locked_funds = lock_funds_concurrent(handle).await?;
+
+    // Create unsigned transaction
+    let unsigned_tx = tx_builder.create_unsigned_transaction(
+        &account,
+        locked_funds,
+        vec![recipient],
+        MicroMinotari(fee_per_gram),
+    )?;
+
+    // Sign
+    let key_manager = account.get_key_manager(&handle.password)?;
+    let consensus_constants = ConsensusConstantsBuilder::new(Network::Esmeralda).build();
+    let signed_result = sign_locked_transaction(
+        &key_manager,
+        consensus_constants,
+        Network::Esmeralda,
+        unsigned_tx,
+    )?;
+
+    // Broadcast
+    broadcast_signed_concurrent(handle, &signed_result).await
+}
+
+/// Lock funds for a concurrent transaction.
+async fn lock_funds_concurrent(
+    handle: &WalletHandle,
+) -> Result<minotari::api::types::LockFundsResult> {
+    use minotari::db::{get_account_by_name, fetch_unspent_outputs};
+    use tari_transaction_components::tari_amount::MicroMinotari;
+    use tari_transaction_components::utxo_selection::UtxoValue;
+
+    let db = minotari::init_db(handle.db_path.clone())?;
+    let conn = db.get()?;
+
+    let account = get_account_by_name(&conn, "default")?
+        .ok_or_else(|| anyhow!("Default account not found"))?;
+    let outputs = fetch_unspent_outputs(&conn, account.id, 0)?;
+
+    let amount_per_output = MicroMinotari(100_000);
+    let total_amount = amount_per_output.0;
+
+    let mut locked_outputs = Vec::new();
+    let mut accumulated = 0u64;
+
+    for output in outputs {
+        locked_outputs.push(output.output.clone());
+        accumulated += output.value().as_u64();
+        if accumulated >= total_amount {
+            break;
+        }
+    }
+
+    let fee_per_gram = MicroMinotari(5);
+    let estimated_tx_size = 500;
+    let fee_with_change = MicroMinotari(fee_per_gram.0 * estimated_tx_size);
+    let fee_without_change = MicroMinotari((fee_per_gram.0 * (estimated_tx_size - 100)) / 2);
+
+    Ok(minotari::api::types::LockFundsResult {
+        utxos: locked_outputs,
+        requires_change_output: accumulated > total_amount,
+        total_value: MicroMinotari(accumulated),
+        fee_without_change,
+        fee_with_change,
+    })
+}
+
+/// Broadcast a signed transaction via HTTP RPC (concurrent version).
+async fn broadcast_signed_concurrent(
+    handle: &WalletHandle,
+    signed_result: &tari_transaction_components::offline_signing::models::SignedOneSidedTransactionResult,
+) -> Result<u64> {
+    let client = reqwest::Client::new();
+    let submit_url = format!("{}/json_rpc", handle.base_node_http);
+    let transaction = &signed_result.signed_transaction.transaction;
+
+    let request = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": "1",
+        "method": "submit_transaction",
+        "params": { "transaction": transaction }
+    });
+
+    let response = client
+        .post(&submit_url)
+        .json(&request)
+        .send()
+        .await
+        .context("Failed to send broadcast request")?;
+
+    let status = response.status();
+    if status.is_success() {
+        let numeric_tx_id = signed_result.request.tx_id.as_u64();
+        debug!("Transaction broadcast successfully (tx_id={})", numeric_tx_id);
+        Ok(numeric_tx_id)
+    } else {
+        anyhow::bail!("Transaction broadcast failed: {}", status);
     }
 }
