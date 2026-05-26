@@ -43,11 +43,13 @@ minotari_app_grpc = { version = "5.3.1-pre.0", default-features = false }
 tari_common = "5.3.1-pre.0"
 tari_common_types = "5.3.1-pre.0"
 tari_transaction_components = "5.3.1-pre.0"
+tari_utilities = "0.8"
 
 # New wallet library integration
 minotari = { git = "https://github.com/tari-project/minotari-cli.git", branch = "main" }
 async-trait = "0.1"
 env_logger = "0.11"
+futures = "0.3"
 
 [profile.release]
 overflow-checks = true
