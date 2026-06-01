@@ -21,3 +21,4 @@ SITUATION_ANALYSIS.md
 # Local config files with paths
 config.toml
 config/
+data/

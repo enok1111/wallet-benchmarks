@@ -16,34 +16,6 @@ pub struct BaseNodeRpcClient {
     http: reqwest::Client,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[allow(dead_code)]
-pub struct BalanceResponse {
-    pub available_balance: u64,
-    pub pending_incoming_balance: u64,
-    pub pending_outgoing_balance: u64,
-    #[serde(default)]
-    pub timelocked_balance: u64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TipHeightResponse {
-    pub height: u64,
-    #[serde(default)]
-    pub hash: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[allow(dead_code)]
-pub struct TransactionSubmitResponse {
-    #[serde(default)]
-    pub is_success: bool,
-    #[serde(default)]
-    pub transaction_id: String,
-    #[serde(default)]
-    pub failure_message: String,
-}
-
 impl BaseNodeRpcClient {
     /// Create a new RPC client for the given base node URL
     pub fn new(base_url: &str) -> Self {
@@ -60,10 +32,10 @@ impl BaseNodeRpcClient {
 
     /// Get the current chain tip height
     pub async fn get_tip_height(&self) -> Result<u64> {
-        let url = format!("{}/v1/tip_height", self.base_url);
+        let url = format!("{}/get_tip_info", self.base_url);
         debug!("GET {}", url);
 
-        let response: TipHeightResponse = self
+        let response: TipInfoResponse = self
             .http
             .get(&url)
             .send()
@@ -73,19 +45,29 @@ impl BaseNodeRpcClient {
             .await
             .context("Failed to parse response")?;
 
-        Ok(response.height)
+        Ok(response.metadata.best_block_height)
     }
 
-    /// Submit a transaction to the base node
+    /// Submit a transaction to the base node via JSON-RPC
     #[allow(dead_code)]
-    pub async fn submit_transaction(&self, tx_bytes: &[u8]) -> Result<String> {
-        let url = format!("{}/v1/transactions", self.base_url);
-        debug!("POST {} ({} bytes)", url, tx_bytes.len());
+    pub async fn submit_transaction(&self, tx_json: &serde_json::Value) -> Result<String> {
+        let url = format!("{}/json_rpc", self.base_url);
+        debug!("POST {} (JSON-RPC submit_transaction)", url);
 
-        let response: TransactionSubmitResponse = self
+        let request = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": "1",
+            "method": "submit_transaction",
+            "params": {
+                "transaction": tx_json,
+                "version": 2
+            }
+        });
+
+        let response: serde_json::Value = self
             .http
             .post(&url)
-            .body(tx_bytes.to_vec())
+            .json(&request)
             .send()
             .await
             .context("Failed to send transaction")?
@@ -93,17 +75,25 @@ impl BaseNodeRpcClient {
             .await
             .context("Failed to parse response")?;
 
-        if !response.is_success {
-            return Err(anyhow!("Transaction submission failed: {}", response.failure_message));
+        if let Some(error) = response.get("error") {
+            return Err(anyhow!("Transaction submission failed: {}", error));
         }
 
-        Ok(response.transaction_id)
+        let result = response.get("result").context("Missing result in response")?;
+        let accepted = result.get("accepted").and_then(|v| v.as_bool()).unwrap_or(false);
+
+        if !accepted {
+            let reason = result.get("rejection_reason").and_then(|v| v.as_str()).unwrap_or("unknown");
+            return Err(anyhow!("Transaction rejected: {}", reason));
+        }
+
+        Ok("accepted".to_string())
     }
 
     /// Get block outputs at a specific height (for scanning)
     #[allow(dead_code)]
     pub async fn get_block_outputs(&self, height: u64) -> Result<Vec<BlockOutput>> {
-        let url = format!("{}/v1/block_outputs/{}", self.base_url, height);
+        let url = format!("{}/get_utxos_by_block?block_height={}", self.base_url, height);
         debug!("GET {}", url);
 
         let response: BlockOutputsResponse = self
@@ -122,7 +112,7 @@ impl BaseNodeRpcClient {
     /// Check if the base node is reachable
     #[allow(dead_code)]
     pub async fn check_connectivity(&self) -> Result<bool> {
-        let url = format!("{}/v1/version", self.base_url);
+        let url = format!("{}/get_tip_info", self.base_url);
         debug!("GET {} (connectivity check)", url);
 
         match self.http.get(&url).send().await {
@@ -150,6 +140,50 @@ impl BaseNodeRpcClient {
             tokio::time::sleep(Duration::from_secs(2)).await;
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
+pub struct BalanceResponse {
+    pub available_balance: u64,
+    pub pending_incoming_balance: u64,
+    pub pending_outgoing_balance: u64,
+    #[serde(default)]
+    pub timelocked_balance: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TipInfoMetadata {
+    pub best_block_height: u64,
+    #[serde(default, deserialize_with = "deserialize_hex_array")]
+    pub best_block_hash: Vec<u8>,
+    #[serde(default)]
+    pub pruning_horizon: u64,
+    #[serde(default)]
+    pub pruned_height: u64,
+    #[serde(default)]
+    pub accumulated_difficulty: String,
+    #[serde(default)]
+    pub timestamp: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TipInfoResponse {
+    pub metadata: TipInfoMetadata,
+    #[serde(default)]
+    pub is_synced: bool,
+}
+
+fn deserialize_hex_array<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let arr: Vec<u64> = serde::Deserialize::deserialize(deserializer)?;
+    let mut bytes = Vec::with_capacity(arr.len());
+    for v in arr {
+        bytes.push((v & 0xFF) as u8);
+    }
+    Ok(bytes)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
