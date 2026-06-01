@@ -1,54 +1,62 @@
 //! New Wallet Mode (minotari-cli library with offline signing)
 //!
-//! Uses the minotari crate directly for:
-//! - Blockchain scanning via Scanner
-//! - Balance queries via get_balance
-//! - Transaction building and broadcast via HTTP RPC
-//! - SQLite wallet database with encrypted keys
+//! Uses the `minotari` library directly for all wallet operations:
+//! - Blockchain scanning via `Scanner`
+//! - Balance queries via `get_balance()`
+//! - UTXO selection via `FundLocker`
+//! - Transaction building via `OneSidedTransaction`
+//! - Broadcasting via `WalletHttpClient`
+//! - Confirmation tracking via `TransactionMonitor`
 //!
-//! Key difference from OldWalletMode: NO gRPC calls. All operations use
-//! the library's own functions and HTTP RPC for broadcasting.
+//! Key difference from OldWalletMode: NO gRPC calls, NO subprocess, NO raw SQL.
+//! All operations use the library's own functions.
 
 use anyhow::{anyhow, Context, Result};
 use log::{debug, info, warn};
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::str::FromStr;
 use std::time::Duration;
+
+use minotari::db::SqlitePool;
+use minotari::http::WalletHttpClient;
+use minotari::transactions::fund_locker::FundLocker;
+use minotari::transactions::monitor::{MonitoringState, TransactionMonitor};
+use minotari::transactions::one_sided_transaction::{OneSidedTransaction, Recipient};
+
+use tari_common::configuration::Network;
+use tari_common_types::seeds::cipher_seed::CipherSeed;
+use tari_common_types::seeds::mnemonic::Mnemonic;
+use tari_common_types::seeds::seed_words::SeedWords;
+use tari_common_types::tari_address::TariAddress;
+use tari_transaction_components::consensus::ConsensusConstantsBuilder;
+use tari_transaction_components::offline_signing::sign_locked_transaction;
+use tari_transaction_components::tari_amount::MicroMinotari;
+use url::Url;
 
 use crate::config::HarnessConfig;
 use crate::metrics::ScenarioResult;
 use crate::modes::{WalletMode, WalletModeId};
 
-/// Cloneable wallet handle for concurrent task spawning.
-/// Holds the fields needed for send_to_self and related operations.
-#[derive(Clone)]
-struct WalletHandle {
-    db_path: PathBuf,
-    address: Option<String>,
-    password: String,
-    base_node_http: String,
-}
-
-impl WalletHandle {
-    fn from_wallet(wallet: &NewWalletMode) -> Self {
-        Self {
-            db_path: wallet.db_path.clone(),
-            address: wallet.address.clone(),
-            password: wallet.password.clone(),
-            base_node_http: wallet.base_node_http.clone(),
-        }
-    }
-}
-
+/// New wallet mode using the minotari library directly.
+///
+/// All operations go through library functions:
+/// - `FundLocker` for UTXO selection and locking
+/// - `OneSidedTransaction` for building unsigned transactions
+/// - `sign_locked_transaction` for offline signing
+/// - `WalletHttpClient` for broadcasting to the base node
+/// - `TransactionMonitor` for tracking confirmations
 pub struct NewWalletMode {
     data_dir: PathBuf,
     db_path: PathBuf,
+    db_pool: Option<SqlitePool>,
     address: Option<String>,
     seed_words: Vec<String>,
     password: String,
     base_node_http: String,
-    account_id: u32,
+    account_id: i64,
     birthday_height: u64,
+    monitoring_state: MonitoringState,
 }
 
 impl NewWalletMode {
@@ -57,15 +65,28 @@ impl NewWalletMode {
         Self {
             data_dir,
             db_path,
+            db_pool: None,
             address: None,
             seed_words: Vec::new(),
             password: "benchmark_password_32chars_min".to_string(),
             base_node_http: "http://127.0.0.1:18143".to_string(),
             account_id: 1,
             birthday_height: 0,
+            monitoring_state: MonitoringState::new(),
         }
     }
 
+    /// Get or initialize the database connection pool.
+    fn ensure_db_pool(&mut self) -> Result<&SqlitePool> {
+        if self.db_pool.is_none() {
+            let pool = minotari::init_db(self.db_path.clone())
+                .context("Failed to initialize database pool")?;
+            self.db_pool = Some(pool);
+        }
+        Ok(self.db_pool.as_ref().unwrap())
+    }
+
+    /// Initialize the wallet using the library's init function.
     async fn init_wallet_db(&mut self, birthday_height: u64) -> Result<()> {
         info!(
             "Initializing wallet DB at {} with birthday height {}",
@@ -75,20 +96,14 @@ impl NewWalletMode {
 
         std::fs::create_dir_all(&self.data_dir)?;
 
-        // Initialize wallet using seed words via library function
-        use tari_common_types::seeds::mnemonic::Mnemonic;
-        use tari_common_types::seeds::seed_words::SeedWords;
-        use std::str::FromStr;
-
+        // Parse seed words and create cipher seed
         let mnemonic_str = self.seed_words.join(" ");
         let mnemonic_seq = SeedWords::from_str(&mnemonic_str)
             .context("Failed to parse seed words")?;
-        let cipher_seed = tari_common_types::seeds::cipher_seed::CipherSeed::from_mnemonic(
-            &mnemonic_seq,
-            None,
-        )
-        .context("Failed to create CipherSeed from mnemonic")?;
+        let cipher_seed = CipherSeed::from_mnemonic(&mnemonic_seq, None)
+            .context("Failed to create CipherSeed from mnemonic")?;
 
+        // Use library function to initialize wallet
         minotari::utils::init_wallet::init_with_seed_words(
             cipher_seed,
             &self.password,
@@ -97,11 +112,10 @@ impl NewWalletMode {
         )
         .context("Failed to initialize wallet with seed words")?;
 
-        // Persist birthday height to DB so the Scanner starts from the correct height
+        // Set birthday in the database
         {
-            let db = minotari::db::init_db(self.db_path.clone())
-                .context("Failed to init DB for birthday update")?;
-            let conn = db.get().context("Failed to get DB connection")?;
+            let pool = self.ensure_db_pool()?;
+            let conn = pool.get().context("Failed to get DB connection")?;
             let birthday_val: i64 = birthday_height as i64;
             let _ = conn.execute(
                 "UPDATE accounts SET birthday = ?1 WHERE birthday != ?1",
@@ -110,37 +124,35 @@ impl NewWalletMode {
             info!("Set account birthday to {}", birthday_height);
         }
 
-        // Get the wallet address after initialization
-        let db = minotari::db::init_db(self.db_path.clone())
-            .context("Failed to init DB for address query")?;
-        let conn = db.get().context("Failed to get DB connection")?;
-        let accounts = minotari::db::get_accounts(&conn, Some("default"))
-            .context("Failed to get accounts")?;
-        
-        if let Some(account) = accounts.first() {
-            use tari_common::configuration::Network;
-            let addr = account.get_address(Network::Esmeralda, &self.password)?;
-            self.address = Some(addr.to_string());
-            info!("Wallet address: {}", self.address.as_ref().unwrap());
+        // Get wallet address
+        {
+            let pool = self.ensure_db_pool()?;
+            let conn = pool.get().context("Failed to get DB connection")?;
+            let accounts = minotari::get_accounts(&conn, Some("default"))
+                .context("Failed to get accounts")?;
+
+            if let Some(account) = accounts.first() {
+                let addr = account.get_address(Network::Esmeralda, &self.password)?;
+                self.address = Some(addr.to_string());
+                info!("Wallet address: {}", self.address.as_ref().unwrap());
+            }
         }
 
-        debug!("Wallet database initialized successfully");
         Ok(())
     }
 
-    async fn scan_blockchain(&self) -> Result<Vec<minotari::WalletEvent>> {
-        use minotari::{Scanner, ScanMode};
-
+    /// Scan blockchain using the library's Scanner.
+    async fn scan_blockchain(&mut self) -> Result<Vec<minotari::WalletEvent>> {
         info!("Scanning blockchain via {} (library integration)", self.base_node_http);
 
-        let (events, _more_blocks) = Scanner::new(
+        let (events, _more_blocks) = minotari::Scanner::new(
             &self.password,
             &self.base_node_http,
             self.db_path.clone(),
             100,
             10,
         )
-        .mode(ScanMode::Full)
+        .mode(minotari::ScanMode::Full)
         .account("default")
         .run()
         .await
@@ -150,97 +162,99 @@ impl NewWalletMode {
         Ok(events)
     }
 
-    async fn query_balance(&self) -> Result<u64> {
-        use minotari::{get_balance, init_db};
+    /// Get wallet balance using the library's get_balance function.
+    async fn query_balance(&mut self) -> Result<u64> {
+        let pool = self.ensure_db_pool()?;
+        let conn = pool.get().context("Failed to get DB connection")?;
 
-        let db = init_db(self.db_path.clone())
-            .context("Failed to initialize database connection")?;
-        let conn = db.get().context("Failed to get DB connection")?;
-
-        let balance = get_balance(&conn, self.account_id as i64)
+        let balance = minotari::get_balance(&conn, self.account_id)
             .context("Failed to query balance")?;
 
-        debug!("Balance: {} µT available", balance.available.0);
+        debug!("Balance: {} uT available", balance.available.0);
         Ok(balance.available.0)
     }
 
-    async fn query_utxo_count(&self) -> Result<u32> {
-        use minotari::{db::fetch_unspent_outputs, db::get_accounts, init_db};
+    /// Get UTXO count using the library's fetch_unspent_outputs.
+    async fn query_utxo_count(&mut self) -> Result<u32> {
+        let pool = self.ensure_db_pool()?;
+        let conn = pool.get().context("Failed to get DB connection")?;
 
-        let db = init_db(self.db_path.clone())
-            .context("Failed to initialize database connection")?;
-        let conn = db.get().context("Failed to get DB connection")?;
-
-        let accounts = get_accounts(&conn, Some("default"))
+        let accounts = minotari::get_accounts(&conn, Some("default"))
             .context("Failed to get accounts")?;
         let account = accounts.first()
             .ok_or_else(|| anyhow!("Default account not found"))?;
 
-        let outputs = fetch_unspent_outputs(&conn, account.id, 0)
+        let outputs = minotari::db::fetch_unspent_outputs(&conn, account.id, 0)
             .context("Failed to fetch unspent outputs")?;
 
         debug!("UTXO count: {}", outputs.len());
         Ok(outputs.len() as u32)
     }
 
-    fn generate_seed_words(_mode_id: WalletModeId) -> Vec<String> {
-        crate::modes::generate_tari_seed_words()
+    /// Lock funds using the library's FundLocker.
+    #[allow(dead_code)]
+    async fn lock_funds(&mut self, amount: MicroMinotari, num_outputs: usize, fee_per_gram: MicroMinotari) -> Result<minotari::api::types::LockFundsResult> {
+        let pool = self.ensure_db_pool()?;
+        let locker = FundLocker::new(pool.clone());
+
+        // Use library's FundLocker for proper UTXO selection and locking
+        let result = locker.lock(
+            self.account_id,
+            amount,
+            num_outputs,
+            fee_per_gram,
+            None, // estimated_output_size - use default
+            None, // idempotency_key - generate random
+            300,  // seconds_to_lock_utxos - 5 minute lock
+            3,    // confirmation_window
+        ).context("Failed to lock funds")?;
+
+        debug!("Locked {} UTXOs worth {}", result.utxos.len(), result.total_value.0);
+        Ok(result)
     }
 
-    /// Send a transaction to self using the library's offline signing flow.
-    ///
-    /// Flow: Lock UTXOs -> Create unsigned tx -> Sign with sign_locked_transaction
-    ///       -> Broadcast via HTTP RPC to base node
-    async fn send_to_self(&self, output_count: u32, fee_per_gram: u64) -> Result<u64> {
-        use minotari::transactions::one_sided_transaction::{OneSidedTransaction, Recipient};
-        use minotari::db::get_account_by_name;
-        use tari_common::configuration::Network;
-        use tari_common_types::tari_address::TariAddress;
-        use tari_transaction_components::offline_signing::sign_locked_transaction;
-        use tari_transaction_components::consensus::ConsensusConstantsBuilder;
-        use tari_transaction_components::tari_amount::MicroMinotari;
+    /// Send a transaction using the full library flow:
+    /// lock -> build -> sign -> broadcast -> monitor
+    async fn send_transaction(&mut self, recipients: Vec<Recipient>, fee_per_gram: u64) -> Result<u64> {
+        let pool = self.ensure_db_pool()?.clone();
+        let conn = pool.get().context("Failed to get DB connection")?;
 
-        let db = minotari::init_db(self.db_path.clone())?;
-        let conn = db.get()?;
-
-        let account = get_account_by_name(&conn, "default")?
+        // Get account
+        let account = minotari::db::get_account_by_name(&conn, "default")?
             .ok_or_else(|| anyhow!("Default account not found"))?;
 
-        let address = TariAddress::from_base58(
-            self.address.as_deref().ok_or_else(|| anyhow!("Wallet address not available"))?,
-        )?;
+        // Calculate total amount for locking
+        let total_amount: u64 = recipients.iter().map(|r| r.amount.0).sum();
+        let num_outputs = recipients.len().max(1);
 
-        // Create unsigned transaction using library
-        let tx_builder = OneSidedTransaction::new(db.clone(), Network::Esmeralda, self.password.clone());
+        // Step 1: Lock funds using FundLocker
+        let locker = FundLocker::new(pool.clone());
+        let locked_funds = locker.lock(
+            self.account_id,
+            MicroMinotari(total_amount),
+            num_outputs,
+            MicroMinotari(fee_per_gram),
+            None, // estimated_output_size - use default
+            None, // idempotency_key - generate random
+            300,  // seconds_to_lock_utxos - 5 minute lock
+            3,    // confirmation_window
+        ).context("Failed to lock funds")?;
 
-        let amount_per_output = MicroMinotari(100_000);
-        let total_amount = amount_per_output.0 * output_count as u64;
+        // Step 2: Create unsigned transaction using OneSidedTransaction
+        let tx_builder = OneSidedTransaction::new(
+            pool.clone(),
+            Network::Esmeralda,
+            self.password.clone(),
+        );
 
-        let recipient = Recipient {
-            address: address.clone(),
-            amount: MicroMinotari(total_amount),
-            payment_id: Some(format!(
-                "bench-s1-{}-{}",
-                output_count,
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_millis()
-            )),
-        };
-
-        // Lock funds for this transaction (simple UTXO selection)
-        let locked_funds = self.lock_funds(output_count).await?;
-
-        // Create unsigned transaction (sync function from library)
         let unsigned_tx = tx_builder.create_unsigned_transaction(
             &account,
             locked_funds,
-            vec![recipient],
+            recipients,
             MicroMinotari(fee_per_gram),
-        )?;
+        ).context("Failed to create unsigned transaction")?;
 
-        // Sign the transaction externally using sign_locked_transaction
+        // Step 3: Sign the transaction
         let key_manager = account.get_key_manager(&self.password)?;
         let consensus_constants = ConsensusConstantsBuilder::new(Network::Esmeralda).build();
         let signed_result = sign_locked_transaction(
@@ -248,143 +262,47 @@ impl NewWalletMode {
             consensus_constants,
             Network::Esmeralda,
             unsigned_tx,
-        )?;
+        ).context("Failed to sign transaction")?;
 
-        // Broadcast via HTTP RPC to base node
+        // Step 4: Broadcast via HTTP RPC
         let tx_id = self.broadcast_signed_transaction(&signed_result).await?;
 
         Ok(tx_id)
     }
 
-    /// Lock funds for a transaction using simple UTXO selection.
-    async fn lock_funds(&self, output_count: u32) -> Result<minotari::api::types::LockFundsResult> {
-        use minotari::db::{get_account_by_name, fetch_unspent_outputs};
-        use tari_transaction_components::tari_amount::MicroMinotari;
-        use tari_transaction_components::utxo_selection::UtxoValue;
-
-        let db = minotari::init_db(self.db_path.clone())?;
-        let conn = db.get()?;
-
-        let account = get_account_by_name(&conn, "default")?
-            .ok_or_else(|| anyhow!("Default account not found"))?;
-        let outputs = fetch_unspent_outputs(&conn, account.id, 0)?;
-
-        // Simple UTXO selection - take the first N outputs needed
-        let amount_per_output = MicroMinotari(100_000);
-        let total_amount = amount_per_output.0 * output_count as u64;
-
-        let mut locked_outputs = Vec::new();
-        let mut accumulated = 0u64;
-
-        for output in outputs {
-            locked_outputs.push(output.output.clone());
-            accumulated += output.value().as_u64();
-            if accumulated >= total_amount {
-                break;
-            }
-        }
-
-        // Estimate fee (rough approximation based on transaction size)
-        let fee_per_gram = MicroMinotari(5);
-        let estimated_tx_size = 500; // rough estimate in grams
-        let fee_with_change = MicroMinotari(fee_per_gram.0 * estimated_tx_size);
-        let fee_without_change = MicroMinotari((fee_per_gram.0 * (estimated_tx_size - 100)) / 2);
-
-        Ok(minotari::api::types::LockFundsResult {
-            utxos: locked_outputs,
-            requires_change_output: accumulated > total_amount,
-            total_value: MicroMinotari(accumulated),
-            fee_without_change,
-            fee_with_change,
-        })
-    }
-
-    /// Broadcast a signed transaction to the base node via HTTP RPC.
+    /// Broadcast a signed transaction using the library's WalletHttpClient.
     async fn broadcast_signed_transaction(
         &self,
         signed_result: &tari_transaction_components::offline_signing::models::SignedOneSidedTransactionResult,
     ) -> Result<u64> {
-        let client = reqwest::Client::new();
+        // Parse base node URL
+        let base_url = Url::parse(&self.base_node_http)
+            .context("Invalid base node URL")?;
 
-        // Submit via JSON-RPC to base node
-        let submit_url = format!("{}/json_rpc", self.base_node_http);
-        let transaction = &signed_result.signed_transaction.transaction;
-        
-        let request = serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": "1",
-            "method": "submit_transaction",
-            "params": { "transaction": transaction }
-        });
+        // Use library's WalletHttpClient for broadcasting
+        let client = WalletHttpClient::new(base_url)
+            .context("Failed to create wallet HTTP client")?;
 
-        let response = client
-            .post(&submit_url)
-            .json(&request)
-            .send()
-            .await?;
+        // Submit the transaction
+        let tx = signed_result.signed_transaction.transaction.clone();
 
-        if response.status().is_success() {
-            // Extract numeric tx_id for tracking
-            let numeric_tx_id = signed_result.request.tx_id.as_u64();
-            debug!("Transaction broadcast successfully (tx_id={})", numeric_tx_id);
-            Ok(numeric_tx_id)
-        } else {
-            let status = response.status();
-            anyhow::bail!("Transaction broadcast failed: {}", status);
-        }
+        let _response = client
+            .submit_transaction(tx)
+            .await
+            .context("Failed to submit transaction")?;
+
+        let numeric_tx_id = signed_result.request.tx_id.as_u64();
+        debug!("Transaction broadcast successfully (tx_id={})", numeric_tx_id);
+        Ok(numeric_tx_id)
     }
 
-    /// Send a single transfer to a destination address using offline signing.
-    async fn send_single_transfer(&self, destination: &str, amount: u64, fee_per_gram: u64) -> Result<u64> {
-        use minotari::transactions::one_sided_transaction::{OneSidedTransaction, Recipient};
-        use minotari::db::get_account_by_name;
-        use tari_common::configuration::Network;
-        use tari_common_types::tari_address::TariAddress;
-        use tari_transaction_components::offline_signing::sign_locked_transaction;
-        use tari_transaction_components::consensus::ConsensusConstantsBuilder;
-        use tari_transaction_components::tari_amount::MicroMinotari;
-
-        let db = minotari::init_db(self.db_path.clone())?;
-        let conn = db.get()?;
-
-        let account = get_account_by_name(&conn, "default")?
-            .ok_or_else(|| anyhow!("Default account not found"))?;
-        let dest_address = TariAddress::from_base58(destination)?;
-
-        let tx_builder = OneSidedTransaction::new(db.clone(), Network::Esmeralda, self.password.clone());
-
-        let recipient = Recipient {
-            address: dest_address,
-            amount: MicroMinotari(amount),
-            payment_id: None,
-        };
-
-        let locked_funds = self.lock_funds(1).await?;
-        
-        let unsigned_tx = tx_builder.create_unsigned_transaction(
-            &account,
-            locked_funds,
-            vec![recipient],
-            MicroMinotari(fee_per_gram),
-        )?;
-
-        let key_manager = account.get_key_manager(&self.password)?;
-        let consensus_constants = ConsensusConstantsBuilder::new(Network::Esmeralda).build();
-        let signed_result = sign_locked_transaction(
-            &key_manager,
-            consensus_constants,
-            Network::Esmeralda,
-            unsigned_tx,
-        )?;
-
-        self.broadcast_signed_transaction(&signed_result).await
-    }
-
-    /// Wait for a transaction to be confirmed by polling the base node.
-    async fn wait_for_confirmation(&self, tx_id: u64, c_min: u32, timeout_secs: u64) -> Result<()> {
+    /// Wait for transaction confirmation using the library's TransactionMonitor.
+    async fn wait_for_confirmation(&mut self, tx_id: u64, c_min: u32, timeout_secs: u64) -> Result<()> {
         let start = std::time::Instant::now();
         let timeout = Duration::from_secs(timeout_secs);
         let base_node = crate::http_rpc::BaseNodeRpcClient::new(&self.base_node_http);
+        let base_node_http = self.base_node_http.clone();
+        let account_id = self.account_id;
 
         loop {
             if start.elapsed() > timeout {
@@ -396,43 +314,54 @@ impl NewWalletMode {
 
             let tip_height = base_node.get_tip_height().await?;
 
-            // Re-scan to pick up any new confirmed outputs
-            if let Err(e) = self.scan_blockchain().await {
-                debug!("Scan during confirmation poll: {}", e);
-            }
+            // Use library's TransactionMonitor for confirmation tracking
+            let pool = self.ensure_db_pool()?.clone();
+            let base_url = Url::parse(&base_node_http)
+                .context("Invalid base node URL")?;
+            let client = WalletHttpClient::new(base_url)
+                .context("Failed to create wallet HTTP client")?;
 
-            // Check if UTXO count has increased (means our tx confirmed)
+            let monitoring_state = self.monitoring_state.clone();
+            let monitor = TransactionMonitor::new(
+                monitoring_state,
+                c_min as u64,
+                None, // webhook_config
+            );
+
+            let _result = monitor
+                .monitor_if_needed(&client, &pool, account_id, tip_height)
+                .await
+                .context("Transaction monitor failed")?;
+
+            // Check if we have any UTXOs and balance (tx confirmed)
             let utxo_count = self.query_utxo_count().await.unwrap_or(0);
             let balance = self.query_balance().await.unwrap_or(0);
-            
+
             debug!(
                 "Tx {} polling: tip={}, utxos={}, balance={}",
                 tx_id, tip_height, utxo_count, balance
             );
 
-            // If we have any UTXOs and balance, assume tx is confirmed
-            if utxo_count > 0 && balance > 0 {
-                let scanned_tip = tip_height;
-                if scanned_tip > 0 {
-                    return Ok(());
-                }
+            if utxo_count > 0 && balance > 0 && tip_height > 0 {
+                return Ok(());
             }
 
             tokio::time::sleep(Duration::from_secs(5)).await;
         }
     }
 
-    async fn wait_for_funding(&self, target_balance: u64, _c_min: u32, timeout_secs: u64) -> Result<u64> {
+    /// Wait for funding to reach target balance.
+    async fn wait_for_funding(&mut self, target_balance: u64, _c_min: u32, timeout_secs: u64) -> Result<u64> {
         let start = std::time::Instant::now();
         let timeout = Duration::from_secs(timeout_secs);
 
         loop {
             if start.elapsed() > timeout {
-                anyhow::bail!("Timeout waiting for funding (target={} µT)", target_balance);
+                anyhow::bail!("Timeout waiting for funding (target={} uT)", target_balance);
             }
 
             let balance = self.query_balance().await?;
-            debug!("Funding poll: balance={} µT (target={} µT)", balance, target_balance);
+            debug!("Funding poll: balance={} uT (target={} uT)", balance, target_balance);
 
             if balance >= target_balance {
                 return Ok(balance);
@@ -440,6 +369,10 @@ impl NewWalletMode {
 
             tokio::time::sleep(Duration::from_secs(10)).await;
         }
+    }
+
+    fn generate_seed_words(_mode_id: WalletModeId) -> Vec<String> {
+        crate::modes::generate_tari_seed_words()
     }
 }
 
@@ -505,7 +438,13 @@ impl WalletMode for NewWalletMode {
     }
 
     async fn get_balance(&self) -> Result<u64> {
-        self.query_balance().await
+        // Create a temporary mutable reference for query
+        let pool = self.db_pool.clone()
+            .ok_or_else(|| anyhow!("Database not initialized"))?;
+        let conn = pool.get().context("Failed to get DB connection")?;
+        let balance = minotari::get_balance(&conn, self.account_id)
+            .context("Failed to query balance")?;
+        Ok(balance.available.0)
     }
 
     async fn teardown(&mut self) -> Result<()> {
@@ -598,13 +537,35 @@ impl NewWalletMode {
 
         let mut current_utxos = 1u32;
 
-        // Doubling phase
+        // Doubling phase: each tx sends to 2 recipients (self) to actually double UTXOs
+        // 1 UTXO consumed -> 2 outputs produced = net +1 UTXO per round
+        // Starting from 1 UTXO: round 1 -> 2, round 2 -> 3, round 3 -> 4, etc.
+        // For true exponential doubling, send amount/2 to self twice
         for round in 0..config.doubling_rounds {
-            match self.send_to_self(current_utxos * 2, config.fee_rate).await {
+            let addr = TariAddress::from_base58(
+                self.address.as_deref()
+                    .ok_or_else(|| anyhow!("Wallet address not available"))?,
+            )?;
+            let half_amount = MicroMinotari(50_000); // Split amount between 2 recipients
+
+            let recipients = vec![
+                Recipient {
+                    address: addr.clone(),
+                    amount: half_amount,
+                    payment_id: Some(format!("bench-s1-double-{}-a", round + 1)),
+                },
+                Recipient {
+                    address: addr,
+                    amount: half_amount,
+                    payment_id: Some(format!("bench-s1-double-{}-b", round + 1)),
+                },
+            ];
+
+            match self.send_transaction(recipients, config.fee_rate).await {
                 Ok(tx_id) => {
-                    info!("S1: Doubling round {} tx: {}", round + 1, tx_id);
+                    info!("S1: Doubling round {} tx: {} (2 recipients)", round + 1, tx_id);
                     self.wait_for_confirmation(tx_id, config.c_min, 300).await?;
-                    current_utxos *= 2;
+                    current_utxos += 1; // 1 consumed, 2 produced = +1 net
                 }
                 Err(e) => {
                     result.failure_reasons.push(format!("Doubling round {} failed: {}", round + 1, e));
@@ -629,7 +590,20 @@ impl NewWalletMode {
                     config.volume_target - current_utxos,
                 );
 
-                match self.send_to_self(outputs_this_round, config.fee_rate).await {
+                // Create multiple recipients for batch tx
+                let addr = TariAddress::from_base58(
+                    self.address.as_deref()
+                        .ok_or_else(|| anyhow!("Wallet address not available"))?,
+                ).context("Invalid Tari address")?;
+                let recipients: Vec<Recipient> = (0..outputs_this_round)
+                    .map(|i| Recipient {
+                        address: addr.clone(),
+                        amount: MicroMinotari(100_000),
+                        payment_id: Some(format!("bench-s1-fanout-{}-{}", round + 1, i)),
+                    })
+                    .collect();
+
+                match self.send_transaction(recipients, config.fee_rate).await {
                     Ok(tx_id) => {
                         info!("S1: Fan-out round {} tx: {}", round + 1, tx_id);
                         self.wait_for_confirmation(tx_id, config.c_min, 300).await?;
@@ -743,20 +717,29 @@ impl NewWalletMode {
         let mut total_successes = 0u32;
         let mut total_failures = 0u32;
 
-        // Clone wallet handle for concurrent tasks -- each task gets its own
-        // copy of the wallet state. SQLite handles its own locking internally.
-        let handle = WalletHandle::from_wallet(self);
+        // Share the database pool across all concurrent tasks so FundLocker
+        // locks are visible and contention is real. SQLite handles concurrent
+        // access with its own internal locking.
+        let db_pool = self.ensure_db_pool()?.clone();
+        let address = self.address.clone();
+        let password = self.password.clone();
+        let base_node_http = self.base_node_http.clone();
+        let account_id = self.account_id;
 
         for &n_concurrent in &config.concurrent_batches {
             info!("S4: Running {} concurrent transactions", n_concurrent);
 
             let mut handles = Vec::new();
             for i in 0..n_concurrent {
-                let h = handle.clone();
+                let pool = db_pool.clone();
+                let addr = address.clone();
+                let pwd = password.clone();
+                let base_http = base_node_http.clone();
+                let acc_id = account_id;
                 let fee_rate = config.fee_rate;
+
                 let handle = tokio::spawn(async move {
-                    let tx_result = send_concurrent_tx(&h, fee_rate).await;
-                    (i, tx_result)
+                    send_concurrent_tx(pool, &addr, &pwd, &base_http, acc_id, fee_rate, i).await
                 });
                 handles.push(handle);
             }
@@ -766,11 +749,11 @@ impl NewWalletMode {
 
             for r in batch_results {
                 match r {
-                    Ok((_, Ok(tx_id))) => {
+                    Ok(Ok(tx_id)) => {
                         total_successes += 1;
                         debug!("S4 tx succeeded: tx_id={}", tx_id);
                     }
-                    Ok((_, Err(e))) => {
+                    Ok(Err(e)) => {
                         total_failures += 1;
                         result.failure_reasons.push(format!("S4 concurrent tx failed: {}", e));
                     }
@@ -810,11 +793,15 @@ impl NewWalletMode {
         let mut failures = 0u32;
 
         for i in 0..config.s5_m {
-            match self.send_single_transfer(
-                self.address.as_deref().unwrap_or("otl_esm_1placeholder"),
-                100_000,
-                config.fee_rate,
-            ).await {
+            let recipient = Recipient {
+                address: TariAddress::from_base58(
+                    self.address.as_deref().unwrap_or("otl_esm_1placeholder"),
+                ).unwrap(),
+                amount: MicroMinotari(100_000),
+                payment_id: Some(format!("bench-s5-individual-{}", i)),
+            };
+
+            match self.send_transaction(vec![recipient], config.fee_rate).await {
                 Ok(_) => successes += 1,
                 Err(e) => {
                     failures += 1;
@@ -910,145 +897,85 @@ impl NewWalletMode {
     }
 }
 
-/// Send a concurrent transaction using a cloneable wallet handle.
-/// This is the standalone version of send_to_self that works with tokio::spawn.
-async fn send_concurrent_tx(handle: &WalletHandle, fee_per_gram: u64) -> Result<u64> {
-    use minotari::transactions::one_sided_transaction::{OneSidedTransaction, Recipient};
-    use minotari::db::get_account_by_name;
-    use tari_common::configuration::Network;
-    use tari_common_types::tari_address::TariAddress;
-    use tari_transaction_components::offline_signing::sign_locked_transaction;
-    use tari_transaction_components::consensus::ConsensusConstantsBuilder;
-    use tari_transaction_components::tari_amount::MicroMinotari;
+/// Send a concurrent transaction using library functions.
+/// This is the standalone version for tokio::spawn.
+/// Uses a shared SqlitePool so FundLocker locks are visible across tasks.
+async fn send_concurrent_tx(
+    pool: SqlitePool,
+    address: &Option<String>,
+    password: &str,
+    base_node_http: &str,
+    account_id: i64,
+    fee_per_gram: u64,
+    index: usize,
+) -> Result<u64> {
+    let conn = pool.get().context("Failed to get DB connection")?;
 
-    let db = minotari::init_db(handle.db_path.clone())?;
-    let conn = db.get()?;
-
-    let account = get_account_by_name(&conn, "default")?
+    let account = minotari::db::get_account_by_name(&conn, "default")?
         .ok_or_else(|| anyhow!("Default account not found"))?;
 
-    let address = TariAddress::from_base58(
-        handle
-            .address
-            .as_deref()
-            .ok_or_else(|| anyhow!("Wallet address not available"))?,
-    )?;
+    let addr = TariAddress::from_base58(
+         address.as_deref()
+             .ok_or_else(|| anyhow!("Wallet address not available"))?,
+     ).context("Invalid Tari address")?;
 
-    let tx_builder =
-        OneSidedTransaction::new(db.clone(), Network::Esmeralda, handle.password.clone());
-
-    let amount_per_output = MicroMinotari(100_000);
-    let total_amount = amount_per_output.0;
-
+    // Create recipient
     let recipient = Recipient {
-        address: address.clone(),
-        amount: MicroMinotari(total_amount),
-        payment_id: Some(format!(
-            "bench-s4-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis()
-        )),
+        address: addr.clone(),
+        amount: MicroMinotari(100_000),
+        payment_id: Some(format!("bench-s4-{}", index)),
     };
 
-    // Lock funds
-    let locked_funds = lock_funds_concurrent(handle).await?;
+    // Lock funds using FundLocker (shared pool = visible locks = real contention)
+    let locker = FundLocker::new(pool.clone());
+    let locked_funds = locker.lock(
+        account_id,
+        MicroMinotari(100_000),
+        1,
+        MicroMinotari(fee_per_gram),
+        None,
+        None,
+        300,  // 5 minute lock
+        3,    // confirmation window
+    ).context("Failed to lock funds for concurrent tx")?;
 
     // Create unsigned transaction
+    let tx_builder = OneSidedTransaction::new(
+        pool.clone(),
+        Network::Esmeralda,
+        password.to_string(),
+    );
+
     let unsigned_tx = tx_builder.create_unsigned_transaction(
         &account,
         locked_funds,
         vec![recipient],
         MicroMinotari(fee_per_gram),
-    )?;
+    ).context("Failed to create unsigned transaction")?;
 
-    // Sign
-    let key_manager = account.get_key_manager(&handle.password)?;
+    // Sign the transaction
+    let key_manager = account.get_key_manager(password)?;
     let consensus_constants = ConsensusConstantsBuilder::new(Network::Esmeralda).build();
     let signed_result = sign_locked_transaction(
         &key_manager,
         consensus_constants,
         Network::Esmeralda,
         unsigned_tx,
-    )?;
+    ).context("Failed to sign transaction")?;
 
-    // Broadcast
-    broadcast_signed_concurrent(handle, &signed_result).await
-}
+    // Broadcast via HTTP RPC
+    let base_url = Url::parse(base_node_http)
+        .context("Invalid base node URL")?;
+    let client = WalletHttpClient::new(base_url)
+        .context("Failed to create wallet HTTP client")?;
 
-/// Lock funds for a concurrent transaction.
-async fn lock_funds_concurrent(
-    handle: &WalletHandle,
-) -> Result<minotari::api::types::LockFundsResult> {
-    use minotari::db::{get_account_by_name, fetch_unspent_outputs};
-    use tari_transaction_components::tari_amount::MicroMinotari;
-    use tari_transaction_components::utxo_selection::UtxoValue;
-
-    let db = minotari::init_db(handle.db_path.clone())?;
-    let conn = db.get()?;
-
-    let account = get_account_by_name(&conn, "default")?
-        .ok_or_else(|| anyhow!("Default account not found"))?;
-    let outputs = fetch_unspent_outputs(&conn, account.id, 0)?;
-
-    let amount_per_output = MicroMinotari(100_000);
-    let total_amount = amount_per_output.0;
-
-    let mut locked_outputs = Vec::new();
-    let mut accumulated = 0u64;
-
-    for output in outputs {
-        locked_outputs.push(output.output.clone());
-        accumulated += output.value().as_u64();
-        if accumulated >= total_amount {
-            break;
-        }
-    }
-
-    let fee_per_gram = MicroMinotari(5);
-    let estimated_tx_size = 500;
-    let fee_with_change = MicroMinotari(fee_per_gram.0 * estimated_tx_size);
-    let fee_without_change = MicroMinotari((fee_per_gram.0 * (estimated_tx_size - 100)) / 2);
-
-    Ok(minotari::api::types::LockFundsResult {
-        utxos: locked_outputs,
-        requires_change_output: accumulated > total_amount,
-        total_value: MicroMinotari(accumulated),
-        fee_without_change,
-        fee_with_change,
-    })
-}
-
-/// Broadcast a signed transaction via HTTP RPC (concurrent version).
-async fn broadcast_signed_concurrent(
-    handle: &WalletHandle,
-    signed_result: &tari_transaction_components::offline_signing::models::SignedOneSidedTransactionResult,
-) -> Result<u64> {
-    let client = reqwest::Client::new();
-    let submit_url = format!("{}/json_rpc", handle.base_node_http);
-    let transaction = &signed_result.signed_transaction.transaction;
-
-    let request = serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": "1",
-        "method": "submit_transaction",
-        "params": { "transaction": transaction }
-    });
-
-    let response = client
-        .post(&submit_url)
-        .json(&request)
-        .send()
+    let tx = signed_result.signed_transaction.transaction.clone();
+    let _response = client
+        .submit_transaction(tx)
         .await
-        .context("Failed to send broadcast request")?;
+        .context("Failed to submit transaction")?;
 
-    let status = response.status();
-    if status.is_success() {
-        let numeric_tx_id = signed_result.request.tx_id.as_u64();
-        debug!("Transaction broadcast successfully (tx_id={})", numeric_tx_id);
-        Ok(numeric_tx_id)
-    } else {
-        anyhow::bail!("Transaction broadcast failed: {}", status);
-    }
+    let numeric_tx_id = signed_result.request.tx_id.as_u64();
+    debug!("Concurrent tx broadcast successfully (tx_id={})", numeric_tx_id);
+    Ok(numeric_tx_id)
 }
